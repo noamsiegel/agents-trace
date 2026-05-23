@@ -1,0 +1,8 @@
+{
+  "name": "pai-provenance",
+  "private": true,
+  "type": "module",
+  "devDependencies": {
+    "bun-types": "^1.0.0"
+  }
+}

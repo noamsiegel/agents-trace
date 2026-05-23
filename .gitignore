@@ -1,0 +1,16 @@
+# Local environment
+.env
+.env.local
+
+# OS
+.DS_Store
+
+# Editor
+.vscode/
+.idea/
+
+# Node
+node_modules/
+
+# Local scrubber config (user-private)
+config.yaml
