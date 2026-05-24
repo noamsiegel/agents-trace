@@ -1,22 +1,20 @@
-export type RepoVisibility = 'PUBLIC' | 'PRIVATE' | 'INTERNAL' | 'UNKNOWN';
+import type { GitleaksFinding } from '../adapters/gitleaks.ts';
+
+export type RepoVisibility = 'public' | 'private' | 'unknown';
+export type GhRepoVisibility = 'PUBLIC' | 'PRIVATE' | 'INTERNAL' | 'UNKNOWN';
 
 export interface PostingFlags {
-  publicOk?: boolean;
-  noAttach?: boolean;
-  dryRun?: boolean;
-  force?: boolean;
-}
-
-export interface GitleaksResult {
-  ok: boolean;
-  report?: string;
+  publicOk: boolean;
+  noAttach: boolean;
+  dryRun: boolean;
+  force: boolean;
 }
 
 export interface PostingPlanInput {
   visibility: RepoVisibility;
   flags: PostingFlags;
-  gitleaksResult: GitleaksResult;
-  action: 'gist-create' | 'pr-attach';
+  gitleaksFindings: GitleaksFinding[];
+  action: 'create' | 'reattach';
 }
 
 export interface PostingPlan {
@@ -24,32 +22,32 @@ export interface PostingPlan {
   reason: string;
 }
 
-export function buildPostingPlan({ visibility, flags, gitleaksResult, action }: PostingPlanInput): PostingPlan {
-  const attaches = action === 'pr-attach' || !flags.noAttach;
+export function normalizeRepoVisibility(visibility: GhRepoVisibility): RepoVisibility {
+  if (visibility === 'PUBLIC') return 'public';
+  if (visibility === 'PRIVATE' || visibility === 'INTERNAL') return 'private';
+  return 'unknown';
+}
 
-  if (visibility === 'PUBLIC' && attaches && !flags.publicOk) {
-    return {
-      allow: false,
-      reason: 'public repository requires --public-ok before attaching provenance gist URL',
-    };
+export function buildPostingPlan({ visibility, flags, gitleaksFindings, action }: PostingPlanInput): PostingPlan {
+  if (flags.dryRun) {
+    return { allow: true, reason: 'dry-run allowed; no network mutation will occur' };
   }
 
-  if (visibility === 'UNKNOWN' && attaches && !flags.publicOk) {
-    return {
-      allow: false,
-      reason: 'unknown repository visibility requires --public-ok before attaching provenance gist URL',
-    };
+  if (gitleaksFindings.length > 0 && !flags.force) {
+    return { allow: false, reason: `gitleaks found ${gitleaksFindings.length} potential secret${gitleaksFindings.length === 1 ? '' : 's'}; use --force to override` };
   }
 
-  if (!gitleaksResult.ok && !flags.force) {
-    return {
-      allow: false,
-      reason: flags.dryRun ? 'gitleaks findings present in dry-run output' : 'gitleaks findings require --force before posting',
-    };
+  if (visibility === 'public' && !flags.publicOk) {
+    return { allow: false, reason: 'public repository requires --public-ok before posting provenance gist URL' };
   }
 
-  return {
-    allow: true,
-    reason: flags.dryRun ? 'dry-run allowed; no network mutation will occur' : 'posting permitted',
-  };
+  if (visibility === 'unknown' && !flags.publicOk) {
+    return { allow: false, reason: 'unknown repository visibility requires --public-ok before posting provenance gist URL' };
+  }
+
+  if (flags.noAttach && action === 'reattach') {
+    return { allow: false, reason: '--no-attach is incompatible with re-attach' };
+  }
+
+  return { allow: true, reason: 'posting permitted' };
 }

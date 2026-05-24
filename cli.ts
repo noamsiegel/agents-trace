@@ -28,20 +28,20 @@
  */
 
 import { spawnSync } from 'node:child_process';
-import { mkdirSync, writeFileSync } from 'node:fs';
-import { homedir, tmpdir } from 'node:os';
+import { homedir } from 'node:os';
 import { join, resolve } from 'node:path';
-import { buildPostingPlan } from './src/core/posting-plan.ts';
+import { buildPostingPlan, normalizeRepoVisibility } from './src/core/posting-plan.ts';
 import { loadRepoSessions, selectHandoffSession, selectSessionsForRange, safeReadJsonl, isRealPrompt, extractTextFromContent } from './src/core/session.ts';
 import { collectMarkdown, loadScrubbers, sanitize } from './src/core/sanitize.ts';
 import { GhClient, type PrContext } from './src/adapters/gh-client.ts';
+import { GitleaksRunner } from './src/adapters/gitleaks.ts';
 
-const VERSION = '0.5.0';
+const VERSION = '0.6.0';
 
 const HOME = homedir();
 const CLAUDE_PROJECTS = join(HOME, '.claude', 'projects');
 
-interface Args {
+export interface Args {
   pr?: string;
   base?: string;
   graceMin: number;
@@ -187,8 +187,7 @@ function detectRepoRoot(override?: string): string {
   return r.stdout.trim();
 }
 
-async function detectPr(args: Args, repoRoot: string): Promise<PrContext> {
-  const client = new GhClient();
+async function detectPr(args: Args, repoRoot: string, client = new GhClient()): Promise<PrContext> {
   try {
     const pr = await client.readPrContext(repoRoot, args.pr);
     return { ...pr, baseRef: args.base ?? pr.baseRef };
@@ -215,14 +214,6 @@ function getDiffFilesForRange(base: string, repoRoot: string): Set<string> {
   return new Set(r.stdout.split('\n').filter(Boolean));
 }
 
-function gitleaksCheck(content: string): { ok: boolean; report: string } {
-  // Write content to a tmp file and run `gitleaks detect --source <file>`.
-  const tmpDir = mkdirSync(join(tmpdir(), 'provenance-' + Date.now()), { recursive: true })!;
-  const tmpFile = join(tmpDir, 'gist.md');
-  writeFileSync(tmpFile, content);
-  const r = run('gitleaks', ['detect', '--source', tmpDir, '--no-banner', '--redact', '--no-git']);
-  return { ok: r.status === 0, report: r.stdout + r.stderr };
-}
 
 async function cmdCollect(args: Args) {
   const repoRoot = detectRepoRoot(args.root);
@@ -255,60 +246,38 @@ function cmdSessionsSince(args: Args) {
   }
 }
 
-async function cmdGistCreate(args: Args) {
+export async function cmdGistCreate(
+  args: Args,
+  deps: {
+    ghClient?: GhClient;
+    gitleaksRunner?: GitleaksRunner;
+    planner?: typeof buildPostingPlan;
+  } = {},
+) {
   const repoRoot = detectRepoRoot(args.root);
-  const pr = await detectPr(args, repoRoot);
-
-  const visibilityPlan = buildPostingPlan({
-    visibility: pr.visibility,
-    flags: { publicOk: args.publicOk, noAttach: args.noAttach, dryRun: args.dryRun, force: args.force },
-    gitleaksResult: { ok: true },
-    action: 'gist-create',
-  });
-  if (!visibilityPlan.allow) {
-    if (pr.visibility === 'PUBLIC') {
-      die(
-        `repo ${pr.nameWithOwner} is PUBLIC. A secret gist URL in a public PR body is effectively public.\n` +
-          `  - Use --dry-run to print the markdown locally without uploading.\n` +
-          `  - Use --no-attach to create a secret gist but NOT link it from the PR.\n` +
-          `  - Use --public-ok to override after reviewing dry-run output.`,
-        4,
-      );
-    }
-    die(
-      `repo visibility could not be determined for ${pr.nameWithOwner}.\n` +
-        `Refusing to attach; rerun with --public-ok if you've reviewed dry-run output.`,
-      4,
-    );
-  }
-
+  const client = deps.ghClient ?? new GhClient();
+  const pr = await detectPr(args, repoRoot, client);
   const range = getCommitTimestampsForRange(`origin/${pr.baseRef}`, repoRoot);
   const diffFiles = args.scope !== 'time' ? getDiffFilesForRange(`origin/${pr.baseRef}`, repoRoot) : new Set<string>();
   const overlapping = selectSessionsForRange(loadRepoSessions(repoRoot, CLAUDE_PROJECTS), pr.baseRef, { mode: args.scope, repoRoot, commitRange: range, diffFiles }, args.graceMin);
   if (overlapping.length === 0) {
     die(`no sessions overlap commits in origin/${pr.baseRef}..HEAD (PR #${pr.number})`);
   }
+
   const md = collectMarkdown(repoRoot, pr.number, pr.baseRef, overlapping, {
     includeCode: args.includeCode,
     scrubbers: loadScrubbers(),
   });
-
-  // Hard-block gitleaks: defeat-soft-confirm only behind --force.
-  const leak = gitleaksCheck(md);
-  const postingPlan = buildPostingPlan({
-    visibility: pr.visibility,
+  const gitleaksFindings = await (deps.gitleaksRunner ?? new GitleaksRunner()).run(md);
+  const plan = (deps.planner ?? buildPostingPlan)({
+    visibility: normalizeRepoVisibility(pr.visibility),
     flags: { publicOk: args.publicOk, noAttach: args.noAttach, dryRun: args.dryRun, force: args.force },
-    gitleaksResult: leak,
-    action: 'gist-create',
+    gitleaksFindings,
+    action: args.noAttach ? 'create' : 'reattach',
   });
-  if (!postingPlan.allow) {
-    console.error(`provenance: gist content contains potential secrets — refusing to post.`);
-    console.error(`Use --force to override (NOT recommended for public repos).`);
-    console.error(leak.report);
-    process.exit(3);
-  }
-  if (!leak.ok) {
-    console.error(`provenance: WARNING: gitleaks reported issues; posting anyway because --force.`);
+
+  if (!plan.allow) {
+    die(plan.reason, 3);
   }
 
   if (args.dryRun) {
@@ -319,7 +288,6 @@ async function cmdGistCreate(args: Args) {
     return;
   }
 
-  const client = new GhClient();
   let existingGistId: string | null = null;
   const body = await client.readPrBody(pr.number);
   if (body !== null) {

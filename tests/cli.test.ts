@@ -15,7 +15,6 @@ import { join } from 'node:path';
 import { encodeCwd, loadRepoSessions, type SessionMeta } from '../src/core/session.ts';
 import { normalizeToRepoRelative, intersectsScope } from '../src/core/scope.ts';
 import { sanitize, type ScrubRule } from '../src/core/sanitize.ts';
-import { buildPostingPlan, type RepoVisibility } from '../src/core/posting-plan.ts';
 
 const CLI = new URL('../cli.ts', import.meta.url).pathname;
 
@@ -227,32 +226,5 @@ describe('Core session and scope helpers', () => {
 
     expect(intersectsScope(session, normalizeToRepoRelative(['packages/b/src/index.ts'], '/repo'), '/repo')).toBe(false);
     expect(intersectsScope(session, normalizeToRepoRelative(['packages/a/src/index.ts'], '/repo'), '/repo')).toBe(true);
-  });
-});
-
-describe('Posting plan', () => {
-  const visibilities: RepoVisibility[] = ['PUBLIC', 'UNKNOWN', 'PRIVATE'];
-
-  test('visibility gates attaching unless explicitly overridden', () => {
-    for (const visibility of visibilities) {
-      const plan = buildPostingPlan({ visibility, flags: {}, gitleaksResult: { ok: true }, action: 'gist-create' });
-      expect(plan.allow).toBe(visibility === 'PRIVATE');
-    }
-
-    expect(buildPostingPlan({ visibility: 'PUBLIC', flags: { publicOk: true }, gitleaksResult: { ok: true }, action: 'gist-create' }).allow).toBe(true);
-    expect(buildPostingPlan({ visibility: 'UNKNOWN', flags: { publicOk: true }, gitleaksResult: { ok: true }, action: 'gist-create' }).allow).toBe(true);
-  });
-
-  test('no-attach avoids public visibility attach gate', () => {
-    expect(buildPostingPlan({ visibility: 'PUBLIC', flags: { noAttach: true }, gitleaksResult: { ok: true }, action: 'gist-create' }).allow).toBe(true);
-  });
-
-  test('dry-run does not override gitleaks without force', () => {
-    expect(buildPostingPlan({ visibility: 'PRIVATE', flags: { dryRun: true }, gitleaksResult: { ok: false }, action: 'gist-create' }).allow).toBe(false);
-  });
-
-  test('force overrides gitleaks failure after visibility passes', () => {
-    expect(buildPostingPlan({ visibility: 'PRIVATE', flags: { force: true }, gitleaksResult: { ok: false }, action: 'gist-create' }).allow).toBe(true);
-    expect(buildPostingPlan({ visibility: 'PUBLIC', flags: { force: true }, gitleaksResult: { ok: false }, action: 'gist-create' }).allow).toBe(false);
   });
 });

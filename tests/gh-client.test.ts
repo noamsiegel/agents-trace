@@ -1,6 +1,7 @@
 import { describe, expect, test } from 'bun:test';
-import { GhClient, type CommandResult, type CommandRunner } from '../src/adapters/gh-client.ts';
-import { buildPostingPlan } from '../src/core/posting-plan.ts';
+import { GhClient } from '../src/adapters/gh-client.ts';
+import { type CommandResult, type CommandRunner } from '../src/adapters/runner.ts';
+import { buildPostingPlan, normalizeRepoVisibility } from '../src/core/posting-plan.ts';
 
 class FakeRunner implements CommandRunner {
   readonly calls: { cmd: string; args: string[]; input?: string; cwd?: string }[] = [];
@@ -39,7 +40,7 @@ describe('GhClient', () => {
     ]);
 
     const ctx = await new GhClient(runner).readPrContext('/repo', '7');
-    const plan = buildPostingPlan({ visibility: ctx.visibility, flags: {}, gitleaksResult: { ok: true }, action: 'gist-create' });
+    const plan = buildPostingPlan({ visibility: normalizeRepoVisibility(ctx.visibility), flags: { publicOk: false, noAttach: false, dryRun: false, force: false }, gitleaksFindings: [], action: 'reattach' });
 
     expect(ctx.visibility).toBe('PUBLIC');
     expect(plan.allow).toBe(false);

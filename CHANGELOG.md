@@ -1,4 +1,14 @@
 # Changelog
+## [0.6.0] — posting plan safety gates
+
+### Added
+- Added `src/adapters/gitleaks.ts` with a concrete `GitleaksRunner` adapter returning structured findings.
+- Added comprehensive posting-plan matrix tests covering visibility, override flags, dry-run, force, gitleaks findings, and create/reattach actions.
+
+### Changed
+- `cmdGistCreate` now gates posting through `buildPostingPlan` after markdown generation and gitleaks scanning.
+- Moved C1 visibility refusal, gitleaks refusal, dry-run allowance, force override, and `--no-attach` reattach compatibility into `src/core/posting-plan.ts`.
+- `provenance --help` reports `0.6.0`.
 
 ## [0.5.0] — GhClient adapter
 
