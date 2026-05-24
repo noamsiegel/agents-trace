@@ -32,11 +32,11 @@ import { homedir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { buildPostingPlan, normalizeRepoVisibility } from './src/core/posting-plan.ts';
 import { loadRepoSessions, selectHandoffSession, selectSessionsForRange, safeReadJsonl, isRealPrompt, extractTextFromContent } from './src/core/session.ts';
-import { collectMarkdown, loadScrubbers, sanitize } from './src/core/sanitize.ts';
+import { collectMarkdown, loadScrubbers, sanitize, type ScrubRule } from './src/core/sanitize.ts';
 import { GhClient, type PrContext } from './src/adapters/gh-client.ts';
 import { GitleaksRunner } from './src/adapters/gitleaks.ts';
 
-const VERSION = '0.6.0';
+const VERSION = '0.7.0';
 
 const HOME = homedir();
 const CLAUDE_PROJECTS = join(HOME, '.claude', 'projects');
@@ -215,7 +215,7 @@ function getDiffFilesForRange(base: string, repoRoot: string): Set<string> {
 }
 
 
-async function cmdCollect(args: Args) {
+async function cmdCollect(args: Args, scrubbers: ScrubRule[] = loadScrubbers()) {
   const repoRoot = detectRepoRoot(args.root);
   const pr = await detectPr(args, repoRoot);
   const range = getCommitTimestampsForRange(`origin/${pr.baseRef}`, repoRoot);
@@ -224,7 +224,7 @@ async function cmdCollect(args: Args) {
   const overlapping = selectSessionsForRange(all, pr.baseRef, { mode: args.scope, repoRoot, commitRange: range, diffFiles }, args.graceMin);
   const md = collectMarkdown(repoRoot, pr.number, pr.baseRef, overlapping, {
     includeCode: args.includeCode,
-    scrubbers: loadScrubbers(),
+    scrubbers,
   });
   process.stdout.write(md);
 }
@@ -252,6 +252,7 @@ export async function cmdGistCreate(
     ghClient?: GhClient;
     gitleaksRunner?: GitleaksRunner;
     planner?: typeof buildPostingPlan;
+    scrubbers?: ScrubRule[];
   } = {},
 ) {
   const repoRoot = detectRepoRoot(args.root);
@@ -266,7 +267,7 @@ export async function cmdGistCreate(
 
   const md = collectMarkdown(repoRoot, pr.number, pr.baseRef, overlapping, {
     includeCode: args.includeCode,
-    scrubbers: loadScrubbers(),
+    scrubbers: deps.scrubbers ?? loadScrubbers(),
   });
   const gitleaksFindings = await (deps.gitleaksRunner ?? new GitleaksRunner()).run(md);
   const plan = (deps.planner ?? buildPostingPlan)({
@@ -306,11 +307,11 @@ export async function cmdGistCreate(
 }
 
 
-async function cmdPrAttach(args: Args) {
-  await cmdGistCreate(args);
+async function cmdPrAttach(args: Args, scrubbers: ScrubRule[] = loadScrubbers()) {
+  await cmdGistCreate(args, { scrubbers });
 }
 
-function cmdHandoff(args: Args) {
+function cmdHandoff(args: Args, scrubbers: ScrubRule[] = loadScrubbers()) {
   // Produce a compact brief of the LATEST session in the current repo, suitable
   // for inclusion in a subagent's system prompt. Different shape from `collect`:
   //
@@ -334,8 +335,6 @@ function cmdHandoff(args: Args) {
 
   const branch = git(['symbolic-ref', '--short', 'HEAD'], repoRoot).stdout.trim() || '(detached)';
   const repoName = repoRoot.split('/').pop()!;
-  const scrubbers = loadScrubbers();
-
   const lines: string[] = [];
   lines.push(`# Handoff brief — ${repoName} (${branch})`);
   lines.push('');
@@ -419,10 +418,9 @@ function cmdHandoff(args: Args) {
   process.stdout.write(lines.join('\n'));
 }
 
-function cmdScrubRules() {
-  const rules = loadScrubbers();
-  for (const r of rules) {
-    console.log(`${r.id}\t${r.pattern}\t→ ${r.replacement}`);
+function cmdScrubRules(scrubbers: ScrubRule[] = loadScrubbers()) {
+  for (const r of scrubbers) {
+    console.log(`${r.name}\t${r.pattern}\t→ ${r.replacement}`);
   }
 }
 
@@ -434,24 +432,25 @@ async function main() {
   }
   const sub = argv[0]!;
   const args = parseArgs(argv.slice(1));
+  const scrubbers = loadScrubbers();
   switch (sub) {
     case 'collect':
-      await cmdCollect(args);
+      await cmdCollect(args, scrubbers);
       break;
     case 'sessions-since':
       cmdSessionsSince(args);
       break;
     case 'gist-create':
-      await cmdGistCreate(args);
+      await cmdGistCreate(args, { scrubbers });
       break;
     case 'pr-attach':
-      await cmdPrAttach(args);
+      await cmdPrAttach(args, scrubbers);
       break;
     case 'handoff':
-      cmdHandoff(args);
+      cmdHandoff(args, scrubbers);
       break;
     case 'scrub-rules':
-      cmdScrubRules();
+      cmdScrubRules(scrubbers);
       break;
     default:
       die(`unknown subcommand: ${sub} (run 'provenance --help')`, 2);

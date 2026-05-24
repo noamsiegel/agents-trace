@@ -152,7 +152,7 @@ describe('Scrubber semantics', () => {
 
 describe('C2 — transcript content is treated as untrusted', () => {
   test('sanitize audit-block strips code blocks, neutralizes links/html, escapes fences, and merges custom scrubbers', () => {
-    const custom: ScrubRule = { id: 'ticket', pattern: /TICKET-[0-9]+/g, replacement: '[REDACTED-TICKET]' };
+    const custom: ScrubRule = { name: 'ticket', description: 'Ticket IDs', pattern: /TICKET-[0-9]+/g, replacement: '[REDACTED-TICKET]', enabled: true };
     const out = sanitize(
       'See [label](https://evil.example) ![alt](https://img.example) <script>x</script> TICKET-123\n' +
         '```ts\nconst secret = "x";\n```\n```',

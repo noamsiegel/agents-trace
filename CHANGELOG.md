@@ -1,4 +1,22 @@
 # Changelog
+
+## [0.7.0] — composable scrubber pipeline
+
+### Added
+- Added `src/core/scrubbers.ts` with a named built-in scrubber registry and `composeScrubbers`.
+- Added JSON config support for disabling built-ins by name and adding custom regex scrubbers:
+  `{ "scrubbers": { "disable": ["github-pat"], "add": [{ "name": "internal-id", "pattern": "INT-\\\\d+", "replacement": "[INT-ID]" }] } }`.
+- Added scrubber pipeline tests covering every built-in, disable/add composition, invalid regex warnings, ordering, and duplicate-name override.
+
+### Changed
+- Moved the built-in scrubber list out of `src/core/sanitize.ts`; adding a built-in is now one registry entry.
+- `cmdCollect`, `cmdGistCreate`, `cmdPrAttach`, `cmdHandoff`, and `scrub-rules` share one composed scrubber set loaded at startup.
+- User-added scrubbers with duplicate built-in names replace the built-in.
+- `provenance --help` reports `0.7.0`.
+
+### Fixed
+- Invalid user scrubber regexes warn to stderr and are skipped without crashing the CLI.
+
 ## [0.6.0] — posting plan safety gates
 
 ### Added

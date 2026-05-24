@@ -76,6 +76,34 @@ provenance scrub-rules                   # show active scrubbers
 Common flags: `--dry-run`, `--no-attach`, `--force`, `--public-ok`,
 `--include-code`, `--grace-min N`, `--base <ref>`.
 
+## Configuration
+
+`provenance` reads optional JSON config from `~/.config/provenance/config.json`.
+
+Built-in scrubbers run first, in registry order. User-added scrubbers run after
+built-ins. `disable` removes matching built-ins by name. If a user-added
+scrubber uses the same name as a built-in, the user scrubber replaces that
+built-in.
+
+```json
+{
+  "scrubbers": {
+    "disable": ["github-pat"],
+    "add": [
+      {
+        "name": "internal-id",
+        "pattern": "INT-\\d+",
+        "replacement": "[INT-ID]"
+      }
+    ]
+  }
+}
+```
+
+Each `add` entry requires `name`, `pattern`, and `replacement`; `flags` is
+optional and defaults to `g`. Invalid regexes are warned to stderr and skipped.
+Run `provenance scrub-rules` to inspect the effective scrubber pipeline.
+
 ## Integrating with your workflow
 
 Add to your shell rc to auto-attach on PR creation:
@@ -121,7 +149,7 @@ Pentested by an adversarial security agent. Properties:
 ## Tests
 
 ```bash
-bun test tests/cli.test.ts
+bun test
 ```
 
 ## Companions
@@ -131,18 +159,9 @@ bun test tests/cli.test.ts
 
 ## Status
 
-v0.1.0 — initial public release. Security-fix milestones from internal review
-(C1/C2/C3) all landed before publication. Some open items:
-
-- **Subagent context handoff.** A planned subcommand (`provenance handoff`)
-  will produce a decision-distilled brief for spawning subagents with prior
-  context. Same JSONL source, different output shape. Not in this release.
-- **File-overlap session scoping.** Current scoping is time-overlap with
-  ±30-minute grace. File-overlap (sessions that touched files in the PR diff)
-  is planned to narrow false positives.
-- **Force-push re-attach.** Currently regex-replaces an existing
-  `🤖 AI Provenance:` line in the PR body. Smarter ETag-based concurrency
-  is planned.
+v0.7.0 completes the roadmap target architecture: pure core modules, concrete
+GitHub/gitleaks adapters, centralized posting-plan gates, and registry-based
+scrubber composition.
 
 ## License
 
