@@ -42,6 +42,6 @@ Use this checklist from a clean `main` checkout.
 
 ## Recovery
 
-- If push fails due to a stale guardrails shim, run `ai-git-guardrails install --force` to refresh hooks, then retry the push.
+- If push fails due to a stale guardrails shim, run `git-guardrails install --force` to refresh hooks, then retry the push.
 - If `gh release create` ran before push succeeded, the remote tag may point at the wrong commit. Recover with `gh release delete vX.Y.Z --yes`, `git push origin --delete vX.Y.Z`, `git tag -d vX.Y.Z`, `git tag -a vX.Y.Z HEAD -m "vX.Y.Z"`, push the tag, then recreate the release.
 - If brew install fails after a formula bump because pkgshare assets are missing, check `def install` in `Formula/ai-trace.rb`; it must list `libexec.install "cli.ts", "package.json", "src"`.

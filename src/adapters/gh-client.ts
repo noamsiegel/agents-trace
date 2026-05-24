@@ -13,7 +13,7 @@ export interface PrContext {
 }
 
 const NEW_MARKER = '🤖 ai-trace:';
-const MARKER_PATTERN = /🤖 (?:ai-trace|AI Provenance):\s*https:\/\/gist\.github\.com\/(?:[^/\s]+\/)?([a-f0-9]+)/;
+const MARKER_PATTERN = /🤖 ai-trace:\s*https:\/\/gist\.github\.com\/(?:[^/\s]+\/)?([a-f0-9]+)/;
 
 
 export class GhClient {
@@ -78,7 +78,7 @@ export class GhClient {
 
     let body = (JSON.parse(view.stdout).body as string) ?? '';
     if (MARKER_PATTERN.test(body)) {
-      body = body.replaceAll(/🤖 (?:ai-trace|AI Provenance):\s*https:\/\/gist\.github\.com\/(?:[^\s]+)/g, `${NEW_MARKER} ${gistUrl}`);
+      body = body.replaceAll(/🤖 ai-trace:\s*https:\/\/gist\.github\.com\/(?:[^\s]+)/g, `${NEW_MARKER} ${gistUrl}`);
     } else {
       body = body.trim() + `\n\n---\n${NEW_MARKER} ${gistUrl}\n`;
     }

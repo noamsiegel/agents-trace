@@ -3,7 +3,7 @@
   "configVersion": 1,
   "workspaces": {
     "": {
-      "name": "pai-provenance",
+      "name": "ai-trace",
       "devDependencies": {
         "bun-types": "^1.0.0",
       },

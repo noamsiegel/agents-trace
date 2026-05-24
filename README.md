@@ -9,16 +9,7 @@
 
 Reviewers see one line in the PR body: `🤖 ai-trace: <gist-url>`. The gist
 contains prompts that produced code, so auditors can trace intent without
-polluting commit history. Re-attach is idempotent for both the new marker and the
-old `🤖 AI Provenance:` marker.
-
-## Why renamed from provenance
-
-SLSA, Sigstore, in-toto, and GitHub artifact attestations already own
-"provenance" in software security: signed statements about build artifacts,
-subjects, predicates, and supply-chain integrity. This tool is narrower: AI
-session tracing for code review. `ai-trace` names that job directly and avoids
-confusing a reviewer who expects cryptographic supply-chain provenance.
+polluting commit history.
 
 ## Adjacent tools
 
@@ -154,15 +145,10 @@ Each `add` entry requires `name`, `pattern`, and `replacement`; `flags` is
 optional and defaults to `g`. Invalid regexes are warned to stderr and skipped.
 Run `ai-trace scrub-rules` to inspect the effective scrubber pipeline.
 
-## Marker migration
+## Marker idempotency
 
-`ai-trace pr-attach` recognizes both markers when re-attaching:
-
-- `🤖 ai-trace: <gist-url>`
-- `🤖 AI Provenance: <gist-url>`
-
-If either marker exists, `ai-trace` edits the existing gist and rewrites the PR
-body to the new `ai-trace` marker instead of appending a duplicate line.
+`ai-trace pr-attach` recognizes an existing `🤖 ai-trace: <gist-url>` marker,
+edits that gist, and rewrites the PR body without appending a duplicate line.
 
 ## Integrating with your workflow
 
@@ -193,7 +179,7 @@ gt() {
 ## Related tools
 
 - [git-wt](https://github.com/noamsiegel/git-wt) — parallel-safe worktree CLI for agentic coding.
-- [ai-git-guardrails](https://github.com/noamsiegel/ai-git-guardrails) — pre-commit secret scanning. Complementary to ai-trace's pre-post gitleaks check.
+- [git-guardrails](https://github.com/noamsiegel/git-guardrails) — pre-commit secret scanning. Complementary to ai-trace's pre-post gitleaks check.
 
 ## Status
 

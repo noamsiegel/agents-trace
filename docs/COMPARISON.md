@@ -126,8 +126,8 @@ metadata, and verifiable supply-chain integrity.
 and process?" `ai-trace` answers "what AI session evidence should a reviewer see
 next to this PR?"
 
-**Compose**: not today. The naming collision is exactly why the project is
-called `ai-trace`, not `provenance`.
+**Compose**: not today. `ai-trace` stays focused on AI session evidence, not
+build attestation.
 
 ## Why these gaps add up to a tool
 

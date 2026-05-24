@@ -32,9 +32,8 @@ These do not change without a major version bump.
    both commit-time overlap and normalized file overlap. See
    `src/core/session.ts` (`encodeCwd`, `loadRepoSessions`,
    `inspectCodexSession`, `selectSessionsForRange`) and `src/core/scope.ts`.
-6. **PR marker writes are idempotent and migrate the old marker**: re-attach
-   must update the existing gist/line instead of appending duplicates, and must
-   recognize both `🤖 ai-trace:` and legacy `🤖 AI Provenance:` markers. See
+6. **PR marker writes are idempotent**: re-attach must update the existing
+   `🤖 ai-trace:` gist/line instead of appending duplicates. See
    `src/adapters/gh-client.ts` (`MARKER_PATTERN`, `findAttachedAiTraceGist`,
    `writeAiTraceLink`).
 7. **The binary is the public API**: `src/core/*` and `src/adapters/*` are

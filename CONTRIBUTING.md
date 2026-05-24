@@ -1,6 +1,6 @@
-# Contributing to provenance
+# Contributing to ai-trace
 
-Thanks for improving `provenance`. Treat transcript handling as security-sensitive: secret gists are URL-protected, not access-controlled.
+Thanks for improving `ai-trace`. Treat transcript handling as security-sensitive: secret gists are URL-protected, not access-controlled.
 
 ## How to report a bug
 
@@ -12,7 +12,7 @@ Open a [feature request](./.github/ISSUE_TEMPLATE/feature.md) with the problem, 
 
 ## Development setup
 
-`provenance` is a Bun/TypeScript CLI.
+`ai-trace` is a Bun/TypeScript CLI.
 
 Dependencies:
 

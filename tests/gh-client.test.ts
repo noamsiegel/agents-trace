@@ -46,11 +46,9 @@ describe('GhClient', () => {
     expect(plan.allow).toBe(false);
   });
 
-  test('findAttachedAiTraceGist extracts gist IDs from old and new marker URLs', async () => {
+  test('findAttachedAiTraceGist extracts gist IDs from ai-trace marker URLs', async () => {
     const client = new GhClient(new FakeRunner([]));
 
-    await expect(client.findAttachedAiTraceGist('x\n🤖 AI Provenance: https://gist.github.com/noam/abc123def456\ny')).resolves.toBe('abc123def456');
-    await expect(client.findAttachedAiTraceGist('🤖 AI Provenance: https://gist.github.com/deadbeef')).resolves.toBe('deadbeef');
     await expect(client.findAttachedAiTraceGist('🤖 ai-trace: https://gist.github.com/noam/feed123')).resolves.toBe('feed123');
     await expect(client.findAttachedAiTraceGist('no marker')).resolves.toBeNull();
   });
@@ -77,7 +75,7 @@ describe('GhClient', () => {
   });
 
   test('writeAiTraceLink replaces only marker URL and preserves other body content', async () => {
-    const body = ['Intro', '', 'Keep this line https://example.test', '🤖 AI Provenance: https://gist.github.com/abc123', '', 'Footer'].join('\n');
+    const body = ['Intro', '', 'Keep this line https://example.test', '🤖 ai-trace: https://gist.github.com/abc123', '', 'Footer'].join('\n');
     const runner = new FakeRunner([ok(JSON.stringify({ body })), ok('')]);
 
     await new GhClient(runner).writeAiTraceLink(12, 'https://gist.github.com/def456');

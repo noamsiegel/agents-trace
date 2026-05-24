@@ -1,5 +1,0 @@
-#!/usr/bin/env bash
-# provenance shim: dispatches to the CLI relative to this script's install dir.
-set -euo pipefail
-script_dir="$(cd "$(dirname "$(realpath "$0")")" && pwd)"
-exec bun "$script_dir/../cli.ts" "$@"

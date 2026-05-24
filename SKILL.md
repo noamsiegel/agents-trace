@@ -1,9 +1,9 @@
 ---
-name: provenance
-description: Capture Claude Code session transcripts as secret gists attached to GitHub PRs. USE WHEN user wants to attach AI provenance to a PR, run provenance collect/gist-create/pr-attach, or audit which sessions produced which PR.
+name: ai-trace
+description: Capture Claude Code session transcripts as secret gists attached to GitHub PRs. USE WHEN user wants to attach AI trace context to a PR, run ai-trace collect/gist-create/pr-attach, or audit which sessions produced which PR.
 ---
 
-# provenance
+# ai-trace
 
 Captures Claude Code session JSONL transcripts as **secret GitHub gists**
 linked from PR descriptions, so reviewers can audit "what was asked" without
@@ -16,20 +16,20 @@ Claude Code session in some repo
    ↓
 ~/.claude/projects/<encoded-cwd>/*.jsonl   ← deterministic capture (Claude writes this)
    ↓
-provenance collect [--pr <num>]
+ai-trace collect [--pr <num>]
    ↓ filter by time overlap with PR's commits
    ↓ strip noise (system messages, tool internals)
    ↓ run scrubbers (api keys, emails, home paths)
    ↓
 cleaned markdown
    ↓
-provenance gist-create     ← gh gist create --secret
+ai-trace gist-create     ← gh gist create --secret
    ↓
 secret gist URL
    ↓
-provenance pr-attach       ← appends to PR description
+ai-trace pr-attach       ← appends to PR description
    ↓
-"🤖 AI Provenance: <gist-url>"
+"🤖 ai-trace: <gist-url>"
 ```
 
 ## Commands
@@ -51,19 +51,21 @@ Common flags:
 
 ## Configuration
 
-`~/.config/provenance/config.yaml`:
+`~/.config/ai-trace/config.json`:
 
-```yaml
-scrubbers:
-  - id: api-keys
-    pattern: '(?i)(api[_-]?key|secret|token|password)["\s:=]+[A-Za-z0-9_\-./+=]{16,}'
-    replacement: '[REDACTED-CREDENTIAL]'
-  - id: emails
-    pattern: '\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Z|a-z]{2,}\b'
-    replacement: '[REDACTED-EMAIL]'
-  - id: home-paths
-    pattern: '/Users/[^/\s]+/'
-    replacement: '/Users/REDACTED/'
+```json
+{
+  "scrubbers": {
+    "disable": ["github-pat"],
+    "add": [
+      {
+        "name": "internal-id",
+        "pattern": "INT-\\d+",
+        "replacement": "[INT-ID]"
+      }
+    ]
+  }
+}
 ```
 
 ## Privacy / security
@@ -82,21 +84,21 @@ scrubbers:
 
 ## Files
 
-- `~/.pai/skills/provenance/cli.ts` — the CLI implementation (Bun/TS)
-- `~/.local/bin/provenance` — shell shim invoking the skill
-- `~/.config/provenance/config.yaml` — scrubber rules + thresholds (optional)
+- `cli.ts` — the CLI implementation (Bun/TS)
+- `ai-trace` — installed CLI command
+- `~/.config/ai-trace/config.json` — scrubber rules + thresholds (optional)
 
 ## Integrating with your PR workflow
 
-Add to your shell rc (`~/.zshrc` or `~/.bashrc`) to auto-attach provenance on PR creation:
+Add to your shell rc (`~/.zshrc` or `~/.bashrc`) to auto-attach ai-trace context on PR creation:
 
 ```bash
-# After `gh pr create` succeeds, attach provenance.
+# After `gh pr create` succeeds, attach ai-trace context.
 gh() {
   command gh "$@"
   local rc=$?
   if [[ "$1" == "pr" && "$2" == "create" && $rc -eq 0 ]]; then
-    provenance pr-attach 2>/dev/null || true
+    ai-trace pr-attach 2>/dev/null || true
   fi
   return $rc
 }
@@ -106,7 +108,7 @@ gt() {
   command gt "$@"
   local rc=$?
   if [[ "$1" == "submit" && $rc -eq 0 ]]; then
-    provenance pr-attach 2>/dev/null || true
+    ai-trace pr-attach 2>/dev/null || true
   fi
   return $rc
 }
@@ -115,5 +117,5 @@ gt() {
 ## Tests
 
 ```bash
-bun test ~/.pai/skills/provenance/tests/cli.test.ts
+bun test tests/cli.test.ts
 ```
