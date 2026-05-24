@@ -1,4 +1,14 @@
 # Changelog
+## [0.8.2] — RELEASING.md + version-match test
+
+### Added
+- `RELEASING.md`: copy-pasteable release checklist + recovery notes (stale shim, tag misalignment, brew install pkgshare miss).
+- `tests/version.test.ts`: asserts `cli.ts` VERSION matches `package.json` version. Catches drift like the v0.8.1 release where they had diverged.
+
+### Fixed
+- Synced `package.json` version (was lagging at `0.8.0` while `cli.ts` was `0.8.1`).
+- Stale `0.8.0` assertion in `tests/cli.test.ts` help check.
+
 ## [0.8.1] — docs + architecture map
 
 ### Added

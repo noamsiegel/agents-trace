@@ -34,7 +34,7 @@ describe('CLI basics', () => {
   test('--help prints usage', () => {
     const r = runCli('--help');
     expect(r.status).toBe(0);
-    expect(r.stdout).toContain('ai-trace 0.8.0');
+    expect(r.stdout).toContain('ai-trace 0.8.2');
     expect(r.stdout).toContain('subcommands:');
   });
 
