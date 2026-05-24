@@ -1,4 +1,18 @@
 # Changelog
+## [0.8.0] — ai-trace rebrand + Codex sessions
+
+### Added
+- Added `--source claude|codex|auto` for `collect`, `gist-create`, and `handoff`; `auto` keeps Claude Code first, then falls back to Codex.
+- Added Codex CLI JSONL loading from `~/.codex/sessions/**/*.jsonl`, filtered by each session's recorded `cwd`.
+- Added tests for Codex prompt extraction, dotted repo paths, and auto fallback.
+
+### Changed
+- Renamed the CLI, package, binary, help text, README, and docs from `provenance` to `ai-trace`.
+- Bumped version to `0.8.0`.
+- Updated PR body attachment marker to `🤖 ai-trace:`.
+
+### Fixed
+- Re-attach now recognizes both the old `🤖 AI Provenance:` marker and the new `🤖 ai-trace:` marker, edits the existing gist, and avoids duplicate PR markers.
 
 ## [0.7.0] — composable scrubber pipeline
 

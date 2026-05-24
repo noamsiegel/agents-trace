@@ -6,7 +6,7 @@ labels: [enhancement]
 
 ## Problem statement
 
-What problem should `provenance` solve?
+What problem should `ai-trace` solve?
 
 ## Proposed solution
 

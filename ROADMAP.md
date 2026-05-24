@@ -1,9 +1,9 @@
-# provenance Roadmap
+# ai-trace Roadmap
 
 > Target architecture and quarterly milestones, derived from the
 > `improve-codebase-architecture` audit on 2026-05-23.
 
-## Current state (v0.3.0)
+## Current state (v0.8.0)
 
 Single-file TypeScript CLI (`cli.ts`, ~930 LOC) running on Bun. The 2026-05
 audit found these structural issues (ordered by leverage):
@@ -21,9 +21,9 @@ audit found these structural issues (ordered by leverage):
 
 ```ts
 // Session identity
-type Session = { id: string; encodedCwd: string; jsonlPath: string; filesTouched: Set<string>; ts: Date };
-function encodeCwd(absPath: string): string;          // owns / + . replacement invariant
-function loadRepoSessions(repoRoot, claudeRoot): Session[];
+type Session = { path: string; firstTs: number; lastTs: number; promptCount: number; filesTouched: Set<string> };
+function encodeCwd(absPath: string): string;          // owns Claude / + . replacement invariant
+function loadRepoSessions(repoRoot, source): Session[];
 function selectSessionsForRange(sessions, baseRef, scope, graceMin): Session[];
 function selectHandoffSession(sessions, name?): Session;
 
@@ -43,7 +43,7 @@ function buildPostingPlan({ visibility, flags, gitleaksResult, action }): Postin
 
 ### Adapter layer (`src/adapters/`, concrete, unmocked)
 
-- `GhClient` — `readPrContext` / `findAttachedProvenanceGist` / `upsertProvenanceGist` / `writeProvenanceLink`
+- `GhClient` — `readPrContext` / `findAttachedAiTraceGist` / `upsertAiTraceGist` / `writeAiTraceLink`
 - `Fs` — `safeReadJsonl` (lstat+fstat, C3 isolated here)
 - `Gitleaks` — `runGitleaks(text)` → `Finding[]`
 - `Git` — `diffFilesForRange`
@@ -118,6 +118,6 @@ function buildPostingPlan({ visibility, flags, gitleaksResult, action }): Postin
 
 ## Open questions
 
-- **Single-file vs `src/` directory**: v0.4.0 introduces `src/core/`. The bin entry stays `cli.ts` for brew compatibility. Decide if the synced copy at `~/.pai/skills/provenance/cli.ts` becomes a directory or a bundled single file.
+- **Single-file vs `src/` directory**: v0.4.0 introduces `src/core/`. The bin entry stays `cli.ts` for brew compatibility. Decide if the synced copy at `~/Documents/GitHub/ai-trace/cli.ts` becomes a directory or a bundled single file.
 - **`gh` vs Octokit**: stays `gh` (no auth complexity, brew install model). Reconsider only if rate limits or pagination force the issue.
 - **Homebrew-core graduation**: candidate after v0.5.0.

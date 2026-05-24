@@ -46,51 +46,61 @@ describe('GhClient', () => {
     expect(plan.allow).toBe(false);
   });
 
-  test('findAttachedProvenanceGist extracts gist IDs from marker URLs', async () => {
+  test('findAttachedAiTraceGist extracts gist IDs from old and new marker URLs', async () => {
     const client = new GhClient(new FakeRunner([]));
 
-    await expect(client.findAttachedProvenanceGist('x\n🤖 AI Provenance: https://gist.github.com/noam/abc123def456\ny')).resolves.toBe('abc123def456');
-    await expect(client.findAttachedProvenanceGist('🤖 AI Provenance: https://gist.github.com/deadbeef')).resolves.toBe('deadbeef');
-    await expect(client.findAttachedProvenanceGist('no marker')).resolves.toBeNull();
+    await expect(client.findAttachedAiTraceGist('x\n🤖 AI Provenance: https://gist.github.com/noam/abc123def456\ny')).resolves.toBe('abc123def456');
+    await expect(client.findAttachedAiTraceGist('🤖 AI Provenance: https://gist.github.com/deadbeef')).resolves.toBe('deadbeef');
+    await expect(client.findAttachedAiTraceGist('🤖 ai-trace: https://gist.github.com/noam/feed123')).resolves.toBe('feed123');
+    await expect(client.findAttachedAiTraceGist('no marker')).resolves.toBeNull();
   });
 
-  test('upsertProvenanceGist edits existing gist when marker is attached', async () => {
+  test('upsertAiTraceGist edits existing gist when marker is attached', async () => {
     const runner = new FakeRunner([ok('')]);
 
-    const gist = await new GhClient(runner).upsertProvenanceGist('abc123', '# body', 'AI provenance for PR #99');
+    const gist = await new GhClient(runner).upsertAiTraceGist('abc123', '# body', 'ai-trace for PR #99');
 
     expect(gist).toEqual({ id: 'abc123', url: 'https://gist.github.com/abc123' });
     expect(runner.calls).toHaveLength(1);
     expect(runner.calls[0]!.args.slice(0, 5)).toEqual(['gist', 'edit', 'abc123', '--filename', 'pr-99.md']);
   });
 
-  test('upsertProvenanceGist falls back to create when editing existing gist fails', async () => {
-    const runner = new FakeRunner([fail('not found'), ok('https://gist.github.com/newid987\n')]);
+  test('upsertAiTraceGist falls back to create when editing existing gist fails', async () => {
+    const runner = new FakeRunner([fail('not found'), ok('https://gist.github.com/def456\n')]);
 
-    const gist = await new GhClient(runner).upsertProvenanceGist('oldid123', '# body', 'AI provenance for PR #5');
+    const gist = await new GhClient(runner).upsertAiTraceGist('abc123', '# body', 'ai-trace for PR #5');
 
-    expect(gist).toEqual({ id: 'newid987', url: 'https://gist.github.com/newid987' });
-    expect(runner.calls[0]!.args.slice(0, 5)).toEqual(['gist', 'edit', 'oldid123', '--filename', 'pr-5.md']);
+    expect(gist).toEqual({ id: 'def456', url: 'https://gist.github.com/def456' });
+    expect(runner.calls[0]!.args.slice(0, 5)).toEqual(['gist', 'edit', 'abc123', '--filename', 'pr-5.md']);
     expect(runner.calls[1]!.args.slice(0, 4)).toEqual(['gist', 'create', '--secret', '--filename']);
     expect(runner.calls[1]!.args[4]).toBe('pr-5.md');
   });
 
-  test('writeProvenanceLink replaces only marker URL and preserves other body content', async () => {
-    const body = ['Intro', '', 'Keep this line https://example.test', '🤖 AI Provenance: https://gist.github.com/oldid123', '', 'Footer'].join('\n');
+  test('writeAiTraceLink replaces only marker URL and preserves other body content', async () => {
+    const body = ['Intro', '', 'Keep this line https://example.test', '🤖 AI Provenance: https://gist.github.com/abc123', '', 'Footer'].join('\n');
     const runner = new FakeRunner([ok(JSON.stringify({ body })), ok('')]);
 
-    await new GhClient(runner).writeProvenanceLink(12, 'https://gist.github.com/newid987');
+    await new GhClient(runner).writeAiTraceLink(12, 'https://gist.github.com/def456');
 
     expect(runner.calls[0]!.args).toEqual(['pr', 'view', '12', '--json', 'body']);
     expect(runner.calls[1]!.args.slice(0, 4)).toEqual(['pr', 'edit', '12', '--body']);
-    expect(runner.calls[1]!.args[4]).toBe(['Intro', '', 'Keep this line https://example.test', '🤖 AI Provenance: https://gist.github.com/newid987', '', 'Footer'].join('\n'));
+    expect(runner.calls[1]!.args[4]).toBe(['Intro', '', 'Keep this line https://example.test', '🤖 ai-trace: https://gist.github.com/def456', '', 'Footer'].join('\n'));
+  });
+  test('writeAiTraceLink replaces new marker URL without duplicating marker', async () => {
+    const body = ['Intro', '🤖 ai-trace: https://gist.github.com/abc123'].join('\n');
+    const runner = new FakeRunner([ok(JSON.stringify({ body })), ok('')]);
+
+    await new GhClient(runner).writeAiTraceLink(12, 'https://gist.github.com/def456');
+
+    expect(runner.calls[1]!.args[4]).toBe(['Intro', '🤖 ai-trace: https://gist.github.com/def456'].join('\n'));
+    expect((runner.calls[1]!.args[4]!.match(/🤖 ai-trace:/g) ?? [])).toHaveLength(1);
   });
 
-  test('writeProvenanceLink appends marker when absent', async () => {
+  test('writeAiTraceLink appends marker when absent', async () => {
     const runner = new FakeRunner([ok(JSON.stringify({ body: 'Intro\n\nBody' })), ok('')]);
 
-    await new GhClient(runner).writeProvenanceLink(14, 'https://gist.github.com/newid987');
+    await new GhClient(runner).writeAiTraceLink(14, 'https://gist.github.com/def456');
 
-    expect(runner.calls[1]!.args[4]).toBe('Intro\n\nBody\n\n---\n🤖 AI Provenance: https://gist.github.com/newid987\n');
+    expect(runner.calls[1]!.args[4]).toBe('Intro\n\nBody\n\n---\n🤖 ai-trace: https://gist.github.com/def456\n');
   });
 });

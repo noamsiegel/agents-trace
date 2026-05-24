@@ -1,4 +1,4 @@
-import { safeReadJsonl, isRealPrompt, extractTextFromContent, type SessionMeta } from './session.ts';
+import { safeReadJsonl, isPromptRow, extractPromptText, type SessionMeta } from './session.ts';
 import { type Scrubber, loadScrubbers } from './scrubbers.ts';
 
 export type ScrubRule = Scrubber;
@@ -31,7 +31,7 @@ interface CollectOptions {
 
 export function collectMarkdown(repoRoot: string, prNum: number, baseRef: string, sessions: SessionMeta[], opts: CollectOptions): string {
   const lines: string[] = [];
-  lines.push(`# AI Provenance for PR #${prNum}`);
+  lines.push(`# ai-trace for PR #${prNum}`);
   lines.push('');
   lines.push(`Captured: ${new Date().toISOString()}`);
   lines.push(`Repo: ${sanitize(repoRoot, 'audit-block', { scrubbers: opts.scrubbers, includeCode: true })}`);
@@ -60,17 +60,16 @@ export function collectMarkdown(repoRoot: string, prNum: number, baseRef: string
     for (const line of sessionContent.split('\n')) {
       if (++rowCount > 50000) break;
       if (!line.trim()) continue;
-      let row: { type?: string; timestamp?: string; message?: { content?: unknown } };
+      let row: { type?: string; timestamp?: string; message?: { content?: unknown }; payload?: unknown };
       try {
         row = JSON.parse(line);
       } catch {
         continue;
       }
-      if (row.type !== 'user') continue;
-      if (!isRealPrompt(row.message?.content)) continue;
+      if (!isPromptRow(row)) continue;
       n++;
       const ts = row.timestamp ? new Date(row.timestamp).toISOString().slice(11, 19) : '';
-      const text = sanitize(extractTextFromContent(row.message?.content).trim(), 'audit-block', {
+      const text = sanitize(extractPromptText(row).trim(), 'audit-block', {
         scrubbers: opts.scrubbers,
         includeCode: opts.includeCode,
       });

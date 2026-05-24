@@ -1,49 +1,70 @@
-# provenance
+# ai-trace
 
-> Capture Claude Code session transcripts as secret gists linked from GitHub PRs.
+> Capture Claude Code and Codex CLI session transcripts as scrubbed secret gists linked from GitHub PRs.
 
-`provenance` reads your Claude Code session JSONL files
-(`~/.claude/projects/<encoded-cwd>/*.jsonl`), scrubs them, and attaches the
-cleaned markdown as a **secret GitHub gist** linked from your PR description.
+`ai-trace` reads local AI coding-session JSONL from Claude Code
+(`~/.claude/projects/<encoded-cwd>/*.jsonl`) and Codex CLI
+(`~/.codex/sessions/**/*.jsonl`), scrubs it, and attaches cleaned markdown as a
+**secret GitHub gist** linked from your PR description.
 
-Reviewers see one line in the PR body: `🤖 AI Provenance: <gist-url>`. That
-gist contains the prompts that produced the code, so auditors can trace
-intent without polluting commit history.
+Reviewers see one line in the PR body: `🤖 ai-trace: <gist-url>`. The gist
+contains prompts that produced code, so auditors can trace intent without
+polluting commit history. Re-attach is idempotent for both the new marker and the
+old `🤖 AI Provenance:` marker.
+
+## Why renamed from provenance
+
+SLSA, Sigstore, in-toto, and GitHub artifact attestations already own
+"provenance" in software security: signed statements about build artifacts,
+subjects, predicates, and supply-chain integrity. This tool is narrower: AI
+session tracing for code review. `ai-trace` names that job directly and avoids
+confusing a reviewer who expects cryptographic supply-chain provenance.
+
+## Adjacent tools
+
+| Tool | What they do | What ai-trace does that they don't |
+|---|---|---|
+| Goose | Agent runtime with JSON/Markdown session export. | Scrubs transcripts, gates with gitleaks, and attaches a secret gist to a PR. |
+| Aider | Pair-programming CLI with chat/LLM history files. | Publishes review-ready evidence for GitHub PRs with public-repo safety checks. |
+| Codex CLI | Stores local JSONL sessions for resume. | Converts Codex sessions into the same scrubbed PR audit artifact as Claude Code. |
+| OpenInference | OpenTelemetry-compatible AI observability trace schema. | Produces a human-readable PR artifact without requiring instrumentation or OTLP. |
+| GitHub artifact attestations | Signed SLSA/in-toto provenance for build artifacts. | Captures prompts and AI coding intent; not a build attestation system. |
 
 ## Why this design
 
 | Approach | What it captures | Where it lives | Adoption friction |
 |---|---|---|---|
 | Co-authored-by trailer | "AI helped" flag | git commit history (permanent, public) | Low. VS Code rolled back automatic injection. |
-| Commit-message provenance block | All prompts | git commit history (permanent, public) | High noise. Long commits. |
+| Commit-message context block | All prompts | git commit history (permanent, public) | High noise. Long commits. |
 | **PR-link to secret gist (this)** | All prompts | Off-history (deletable, URL-protected) | One line in PR body |
 | MCP server / DB query | Session metadata + replay | Local DB | Heavy runtime. Single-user. |
 
-PR-attachment puts provenance where reviewers already look (PR body), keeps
-commit history clean, and lets you delete the gist later if needed.
+PR attachment puts trace data where reviewers already look, keeps commit history
+clean, and lets you delete the gist later if needed.
 
-## ⚠️ Public-repo safety
+## Public-repo safety
 
 **Secret gists are URL-protected, not access-controlled.** Anyone with the URL
 can read the gist. If you put that URL in a public PR body, the transcript is
 effectively public.
 
-`provenance pr-attach` **refuses to attach to public-repo PRs by default**.
-Override with `--public-ok` after confirming the dry-run output is safe to
-make public. Better: keep this tool to private repos.
+`ai-trace pr-attach` **refuses to attach to public-repo PRs by default**.
+Override with `--public-ok` after confirming dry-run output is safe to make
+public. Better: keep this tool to private repos.
 
 ## What it does
 
-```
+```text
 Claude session → ~/.claude/projects/<encoded-cwd>/*.jsonl
-                          ↓ filter by time overlap with PR commits (default ±30 min grace)
+Codex session  → ~/.codex/sessions/**/*.jsonl (filtered by recorded cwd)
+                          ↓ filter by time/file overlap with PR commits
                           ↓ strip code blocks (configurable)
-                          ↓ run scrubbers (15+ default patterns: GitHub PAT, AWS, GCP, Stripe, OpenAI, Anthropic, JWT, private keys, email, home paths)
-                          ↓ neutralize markdown smuggling (links/images/HTML stripped or escaped)
+                          ↓ run scrubbers (15+ default patterns)
+                          ↓ neutralize markdown smuggling
                           ↓ wrap in fenced "untrusted transcript" blocks
-                          ↓ hard gitleaks gate (refuses to post if secrets found, unless --force)
+                          ↓ hard gitleaks gate
                           ↓ gh gist create --secret
-                          ↓ gh pr edit --body  (appends "🤖 AI Provenance: <url>")
+                          ↓ gh pr edit --body (appends or updates "🤖 ai-trace: <url>")
 ```
 
 ## Install
@@ -52,8 +73,8 @@ Requires [`bun`](https://bun.sh), [`gh`](https://cli.github.com), and
 [`gitleaks`](https://github.com/gitleaks/gitleaks).
 
 ```bash
-git clone https://github.com/noamsiegel/provenance.git ~/.local/share/provenance
-ln -s ~/.local/share/provenance/bin/provenance ~/.local/bin/provenance
+git clone https://github.com/noamsiegel/ai-trace.git ~/.local/share/ai-trace
+ln -s ~/.local/share/ai-trace/bin/ai-trace ~/.local/bin/ai-trace
 ```
 
 Authenticate `gh`:
@@ -66,19 +87,24 @@ gh auth refresh -h github.com -s gist,repo
 ## Usage
 
 ```bash
-provenance collect [--pr N]              # print cleaned markdown to stdout
-provenance sessions-since <ref>          # list overlapping sessions for commits since <ref>
-provenance gist-create [--pr N]          # create secret gist; print URL
-provenance pr-attach [--pr N]            # gist-create + edit PR description (idempotent)
-provenance scrub-rules                   # show active scrubbers
+ai-trace collect [--pr N] [--source auto|claude|codex]
+ai-trace sessions-since <ref> [--source auto|claude|codex]
+ai-trace gist-create [--pr N] [--source auto|claude|codex]
+ai-trace pr-attach [--pr N] [--source auto|claude|codex]
+ai-trace handoff [--session ID] [--source auto|claude|codex]
+ai-trace scrub-rules
 ```
 
-Common flags: `--dry-run`, `--no-attach`, `--force`, `--public-ok`,
-`--include-code`, `--grace-min N`, `--base <ref>`.
+Common flags: `--source auto|claude|codex`, `--dry-run`, `--no-attach`,
+`--force`, `--public-ok`, `--include-code`, `--grace-min N`, `--base <ref>`.
+
+`--source auto` is default. It tries Claude Code sessions for the current repo
+first, then Codex sessions. Codex sessions are global, so `ai-trace` scans the
+session tree and keeps only files whose recorded `cwd` equals the repo root.
 
 ## Configuration
 
-`provenance` reads optional JSON config from `~/.config/provenance/config.json`.
+`ai-trace` reads optional JSON config from `~/.config/ai-trace/config.json`.
 
 Built-in scrubbers run first, in registry order. User-added scrubbers run after
 built-ins. `disable` removes matching built-ins by name. If a user-added
@@ -102,7 +128,17 @@ built-in.
 
 Each `add` entry requires `name`, `pattern`, and `replacement`; `flags` is
 optional and defaults to `g`. Invalid regexes are warned to stderr and skipped.
-Run `provenance scrub-rules` to inspect the effective scrubber pipeline.
+Run `ai-trace scrub-rules` to inspect the effective scrubber pipeline.
+
+## Marker migration
+
+`ai-trace pr-attach` recognizes both markers when re-attaching:
+
+- `🤖 ai-trace: <gist-url>`
+- `🤖 AI Provenance: <gist-url>`
+
+If either marker exists, `ai-trace` edits the existing gist and rewrites the PR
+body to the new `ai-trace` marker instead of appending a duplicate line.
 
 ## Integrating with your workflow
 
@@ -114,7 +150,7 @@ gh() {
   command gh "$@"
   local rc=$?
   if [[ "$1" == "pr" && "$2" == "create" && $rc -eq 0 ]]; then
-    provenance pr-attach 2>/dev/null || true
+    ai-trace pr-attach 2>/dev/null || true
   fi
   return $rc
 }
@@ -124,45 +160,18 @@ gt() {
   command gt "$@"
   local rc=$?
   if [[ "$1" == "submit" && $rc -eq 0 ]]; then
-    provenance pr-attach 2>/dev/null || true
+    ai-trace pr-attach 2>/dev/null || true
   fi
   return $rc
 }
 ```
 
-## Security model
+## Related tools
 
-Pentested by an adversarial security agent. Properties:
-
-- **C1 — Public-repo block.** Attaching to public-repo PRs is refused by default.
-- **C2 — Untrusted transcript content.** Prompts are wrapped in fenced code
-  blocks. Markdown links (`[](url)`) are flattened to plain text. HTML tags
-  stripped. Fence-escape attempts (` ``` `) are neutralized.
-- **C3 — Safe file reading.** `lstat`+`fstat`-based session reads. Symlinks,
-  hardlinks, non-regular files, files not owned by current uid, and files
-  larger than 20MB are all rejected. Row count capped at 50000 per session.
-- **Hard gitleaks gate.** The gist body runs through `gitleaks detect` before
-  posting; refuses to post on any finding unless `--force`.
-- **15+ default scrubbers.** GitHub tokens, AWS/GCP/Slack/Stripe/OpenAI/Anthropic
-  keys, JWTs, private-key blocks, DB URLs with basic auth, emails, home paths.
-
-## Tests
-
-```bash
-bun test
-```
-
-## Companions
-
-- [git-wt](https://github.com/noamsiegel/git-wt) — parallel-safe worktree CLI for agentic coding. Knows the worktree↔branch↔session mapping.
-- [guardrails](https://github.com/noamsiegel/guardrails) — pre-commit secret scanning. Complementary to provenance's pre-post gitleaks check.
+- [git-wt](https://github.com/noamsiegel/git-wt) — parallel-safe worktree CLI for agentic coding.
+- [ai-git-guardrails](https://github.com/noamsiegel/ai-git-guardrails) — pre-commit secret scanning. Complementary to ai-trace's pre-post gitleaks check.
 
 ## Status
 
-v0.7.0 completes the roadmap target architecture: pure core modules, concrete
-GitHub/gitleaks adapters, centralized posting-plan gates, and registry-based
-scrubber composition.
-
-## License
-
-MIT. See [LICENSE](./LICENSE).
+Private-use tool. Default posture: safe for private repos, conservative for
+public repos.

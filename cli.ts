@@ -1,17 +1,17 @@
 #!/usr/bin/env bun
 /**
- * provenance — capture Claude Code session JSONL as a secret gist
+ * ai-trace — capture AI session JSONL as a secret gist
  * attached to a GitHub PR.
  *
  * Subcommands:
- *   collect [--pr N] [--base REF] [--include-code]
+ *   collect [--pr N] [--base REF] [--source auto|claude|codex]
  *       Print cleaned markdown for sessions overlapping the PR's commits.
  *   sessions-since <ref>
  *       List sessions whose timestamps overlap commits since <ref>.
  *   gist-create [--pr N] [--public]
  *       collect + create a secret (default) gist; print URL.
  *   pr-attach [--pr N]
- *       gist-create + append/update "AI Provenance: <url>" in PR description.
+ *       gist-create + append/update "ai-trace: <url>" in PR description.
  *   scrub-rules
  *       Print active scrubber rules.
  *
@@ -28,18 +28,14 @@
  */
 
 import { spawnSync } from 'node:child_process';
-import { homedir } from 'node:os';
-import { join, resolve } from 'node:path';
+import { resolve } from 'node:path';
 import { buildPostingPlan, normalizeRepoVisibility } from './src/core/posting-plan.ts';
-import { loadRepoSessions, selectHandoffSession, selectSessionsForRange, safeReadJsonl, isRealPrompt, extractTextFromContent } from './src/core/session.ts';
+import { loadRepoSessions, selectHandoffSession, selectSessionsForRange, safeReadJsonl, isPromptRow, extractPromptText, type SessionSource } from './src/core/session.ts';
 import { collectMarkdown, loadScrubbers, sanitize, type ScrubRule } from './src/core/sanitize.ts';
 import { GhClient, type PrContext } from './src/adapters/gh-client.ts';
 import { GitleaksRunner } from './src/adapters/gitleaks.ts';
 
-const VERSION = '0.7.0';
-
-const HOME = homedir();
-const CLAUDE_PROJECTS = join(HOME, '.claude', 'projects');
+const VERSION = '0.8.0';
 
 export interface Args {
   pr?: string;
@@ -53,6 +49,7 @@ export interface Args {
   noAttach: boolean;
   force: boolean;
   root?: string;
+  source: SessionSource;
   public_: boolean;
   publicOk: boolean;
   rest: string[];
@@ -66,6 +63,7 @@ function parseArgs(argv: string[]): Args {
     dryRun: false,
     noAttach: false,
     force: false,
+    source: 'auto',
     public_: false,
     publicOk: false,
     rest: [],
@@ -88,6 +86,13 @@ function parseArgs(argv: string[]): Args {
           die(`--scope must be one of: time, file, both (got: ${v})`);
         }
         args.scope = v;
+        break;
+      case '--source':
+        const source = argv[++i];
+        if (source !== 'claude' && source !== 'codex' && source !== 'auto') {
+          die(`--source must be one of: claude, codex, auto (got: ${source})`);
+        }
+        args.source = source;
         break;
       case '--include-code':
         args.includeCode = true;
@@ -131,13 +136,13 @@ function parseArgs(argv: string[]): Args {
 }
 
 function printHelp() {
-  console.log(`provenance ${VERSION} — Claude session → secret gist → PR description.
+  console.log(`ai-trace ${VERSION} — AI session → secret gist → PR description.
 
 usage:
-  provenance <subcommand> [flags]
+  ai-trace <subcommand> [flags]
 
 subcommands:
-  collect [--pr N] [--base REF] [--include-code]
+  collect [--pr N] [--base REF] [--source auto|claude|codex]
                           Print cleaned markdown.
   sessions-since <ref>    List overlapping sessions for commits since <ref>.
   gist-create [--pr N] [--public] [--no-attach]
@@ -156,6 +161,7 @@ flags:
                       'both' = intersection of time AND file overlap (most precise).
                       'file' = only sessions that touched files in the PR diff.
                       'time' = only time-overlap (broader, the v0.1.0 default).
+  --source <source>   Session source: auto | claude | codex (default: auto).
   --include-code      Include code blocks (default: omit).
   --dry-run           Print what would happen; do not create gist.
   --no-attach         Create gist but don't edit the PR.
@@ -167,7 +173,7 @@ flags:
 }
 
 function die(msg: string, code = 1): never {
-  console.error(`provenance: ${msg}`);
+  console.error(`ai-trace: ${msg}`);
   process.exit(code);
 }
 
@@ -219,7 +225,7 @@ async function cmdCollect(args: Args, scrubbers: ScrubRule[] = loadScrubbers()) 
   const repoRoot = detectRepoRoot(args.root);
   const pr = await detectPr(args, repoRoot);
   const range = getCommitTimestampsForRange(`origin/${pr.baseRef}`, repoRoot);
-  const all = loadRepoSessions(repoRoot, CLAUDE_PROJECTS);
+  const all = loadRepoSessions(repoRoot, args.source);
   const diffFiles = args.scope !== 'time' ? getDiffFilesForRange(`origin/${pr.baseRef}`, repoRoot) : new Set<string>();
   const overlapping = selectSessionsForRange(all, pr.baseRef, { mode: args.scope, repoRoot, commitRange: range, diffFiles }, args.graceMin);
   const md = collectMarkdown(repoRoot, pr.number, pr.baseRef, overlapping, {
@@ -231,10 +237,10 @@ async function cmdCollect(args: Args, scrubbers: ScrubRule[] = loadScrubbers()) 
 
 function cmdSessionsSince(args: Args) {
   const ref = args.rest[0];
-  if (!ref) die('usage: provenance sessions-since <ref>', 2);
+  if (!ref) die('usage: ai-trace sessions-since <ref>', 2);
   const repoRoot = detectRepoRoot(args.root);
   const range = getCommitTimestampsForRange(ref, repoRoot);
-  const all = loadRepoSessions(repoRoot, CLAUDE_PROJECTS);
+  const all = loadRepoSessions(repoRoot, args.source);
   const diffFiles = args.scope !== 'time' ? getDiffFilesForRange(ref, repoRoot) : new Set<string>();
   const overlapping = selectSessionsForRange(all, ref, { mode: args.scope, repoRoot, commitRange: range, diffFiles }, args.graceMin);
   if (overlapping.length === 0) {
@@ -260,7 +266,7 @@ export async function cmdGistCreate(
   const pr = await detectPr(args, repoRoot, client);
   const range = getCommitTimestampsForRange(`origin/${pr.baseRef}`, repoRoot);
   const diffFiles = args.scope !== 'time' ? getDiffFilesForRange(`origin/${pr.baseRef}`, repoRoot) : new Set<string>();
-  const overlapping = selectSessionsForRange(loadRepoSessions(repoRoot, CLAUDE_PROJECTS), pr.baseRef, { mode: args.scope, repoRoot, commitRange: range, diffFiles }, args.graceMin);
+  const overlapping = selectSessionsForRange(loadRepoSessions(repoRoot, args.source), pr.baseRef, { mode: args.scope, repoRoot, commitRange: range, diffFiles }, args.graceMin);
   if (overlapping.length === 0) {
     die(`no sessions overlap commits in origin/${pr.baseRef}..HEAD (PR #${pr.number})`);
   }
@@ -292,14 +298,14 @@ export async function cmdGistCreate(
   let existingGistId: string | null = null;
   const body = await client.readPrBody(pr.number);
   if (body !== null) {
-    existingGistId = await client.findAttachedProvenanceGist(body);
+    existingGistId = await client.findAttachedAiTraceGist(body);
   }
 
-  const gist = await client.upsertProvenanceGist(existingGistId, md, `AI provenance for PR #${pr.number}`, args.public_);
+  const gist = await client.upsertAiTraceGist(existingGistId, md, `ai-trace for PR #${pr.number}`, args.public_);
   console.log(gist.url);
   if (args.noAttach) return;
   try {
-    await client.writeProvenanceLink(pr.number, gist.url);
+    await client.writeAiTraceLink(pr.number, gist.url);
   } catch (err) {
     die(err instanceof Error ? err.message : String(err));
   }
@@ -328,10 +334,10 @@ function cmdHandoff(args: Args, scrubbers: ScrubRule[] = loadScrubbers()) {
 
   const lastN = args.lastPrompts ?? 10;
   const repoRoot = detectRepoRoot(args.root);
-  const sessions = loadRepoSessions(repoRoot, CLAUDE_PROJECTS);
+  const sessions = loadRepoSessions(repoRoot, args.source);
 
   const session = selectHandoffSession(sessions, args.session);
-  if (!session) die(args.session ? `session not found: ${args.session}` : 'no Claude Code sessions found for this repo');
+  if (!session) die(args.session ? `session not found: ${args.session}` : 'no AI sessions found for this repo');
 
   const branch = git(['symbolic-ref', '--short', 'HEAD'], repoRoot).stdout.trim() || '(detached)';
   const repoName = repoRoot.split('/').pop()!;
@@ -358,9 +364,9 @@ function cmdHandoff(args: Args, scrubbers: ScrubRule[] = loadScrubbers()) {
     } catch {
       continue;
     }
-    if (row.type === 'user' && isRealPrompt(row.message?.content)) {
+    if (isPromptRow(row)) {
       const ts = row.timestamp ? Date.parse(row.timestamp) : 0;
-      const text = extractTextFromContent(row.message?.content).trim();
+      const text = extractPromptText(row).trim();
       prompts.push({ ts, text });
     }
     if (row.type === 'assistant' && Array.isArray(row.message?.content)) {
@@ -453,7 +459,7 @@ async function main() {
       cmdScrubRules(scrubbers);
       break;
     default:
-      die(`unknown subcommand: ${sub} (run 'provenance --help')`, 2);
+      die(`unknown subcommand: ${sub} (run 'ai-trace --help')`, 2);
   }
 }
 

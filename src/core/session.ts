@@ -1,6 +1,6 @@
 import { closeSync, existsSync, fstatSync, lstatSync, openSync, readSync, readdirSync } from 'node:fs';
-import { join } from 'node:path';
-import { userInfo } from 'node:os';
+import { join, resolve } from 'node:path';
+import { homedir, userInfo } from 'node:os';
 import { normalizeToRepoRelative, intersectsScope } from './scope.ts';
 
 const MAX_JSONL_BYTES = 20 * 1024 * 1024;
@@ -33,7 +33,16 @@ export function encodeCwd(p: string): string {
   return p.replaceAll('/', '-').replaceAll('.', '-');
 }
 
-export function loadRepoSessions(repoRoot: string, claudeRoot: string): SessionMeta[] {
+export type SessionSource = 'claude' | 'codex' | 'auto';
+
+export function loadRepoSessions(repoRoot: string, source: SessionSource = 'auto', claudeRoot = join(process.env.HOME ?? homedir(), '.claude', 'projects')): SessionMeta[] {
+  if (source === 'codex') return loadCodexSessions(repoRoot);
+  const claudeSessions = loadClaudeSessions(repoRoot, claudeRoot);
+  if (source === 'claude' || claudeSessions.length > 0) return claudeSessions;
+  return loadCodexSessions(repoRoot);
+}
+
+export function loadClaudeSessions(repoRoot: string, claudeRoot: string): SessionMeta[] {
   const encoded = encodeCwd(repoRoot);
   const dir = join(claudeRoot, encoded);
   if (!existsSync(dir)) return [];
@@ -86,10 +95,54 @@ export function inspectSession(path: string): SessionMeta | null {
         if (t > lastTs) lastTs = t;
       }
     }
-    if (row.type === 'user' && isRealPrompt(row.message?.content)) promptCount++;
+    if (isPromptRow(row)) promptCount++;
     extractFilePaths(row, filesTouched);
   }
-  return { path, firstTs, lastTs, promptCount, filesTouched };
+  return finiteSession(path, firstTs, lastTs, promptCount, filesTouched);
+}
+
+export function inspectCodexSession(path: string, repoRoot: string): SessionMeta | null {
+  const content = safeReadJsonl(path);
+  if (content === null) return null;
+  let cwd: string | null = null;
+  let firstTs = Number.POSITIVE_INFINITY;
+  let lastTs = 0;
+  let promptCount = 0;
+  let rowCount = 0;
+  const filesTouched = new Set<string>();
+
+  for (const line of content.split('\n')) {
+    if (++rowCount > MAX_JSONL_ROWS) break;
+    if (!line.trim()) continue;
+    let row: { type?: string; timestamp?: string; payload?: unknown };
+    try {
+      row = JSON.parse(line);
+    } catch {
+      continue;
+    }
+
+    const t = timestampOf(row);
+    if (t !== 0) {
+      if (t < firstTs) firstTs = t;
+      if (t > lastTs) lastTs = t;
+    }
+
+    const payload = row.payload && typeof row.payload === 'object' ? row.payload as Record<string, unknown> : null;
+    if (row.type === 'session_meta' && typeof payload?.cwd === 'string') {
+      cwd = resolve(payload.cwd);
+    }
+    if (row.type === 'turn_context' && typeof payload?.cwd === 'string') {
+      cwd ??= resolve(payload.cwd);
+    }
+
+    if (isPromptRow(row)) promptCount++;
+    extractFilePaths(row, filesTouched);
+  }
+
+  // Codex stores sessions in a global tree rather than a cwd-encoded directory.
+  // Scan every session file and keep only transcripts whose recorded cwd is the target repo.
+  if (cwd !== resolve(repoRoot)) return null;
+  return finiteSession(path, firstTs, lastTs, promptCount, filesTouched);
 }
 
 export function extractFilePaths(row: unknown, out: Set<string>): void {
@@ -105,6 +158,12 @@ export function extractFilePaths(row: unknown, out: Set<string>): void {
     for (const [k, val] of Object.entries(v as Record<string, unknown>)) {
       if (k === 'file_path' && typeof val === 'string' && val.length > 0) {
         out.add(val);
+      } else if (k === 'arguments' && typeof val === 'string') {
+        try {
+          stack.push(JSON.parse(val));
+        } catch {
+          // Tool arguments may be arbitrary strings; ignore non-JSON values.
+        }
       } else if (val && typeof val === 'object') {
         stack.push(val);
       }
@@ -172,6 +231,25 @@ export function safeReadJsonl(path: string): string | null {
   }
 }
 
+export function isPromptRow(row: unknown): boolean {
+  const text = extractPromptText(row);
+  return isRealPrompt(text);
+}
+
+export function extractPromptText(row: unknown): string {
+  if (!row || typeof row !== 'object') return '';
+  const r = row as { type?: string; message?: { content?: unknown }; payload?: unknown };
+
+  if (r.type === 'user') return extractTextFromContent(r.message?.content);
+
+  const payload = r.payload && typeof r.payload === 'object' ? r.payload as { type?: string; role?: string; message?: string; content?: unknown } : null;
+  if (!payload) return '';
+
+  if (r.type === 'event_msg' && payload.type === 'user_message' && typeof payload.message === 'string') return payload.message;
+  if (r.type === 'response_item' && payload.type === 'message' && payload.role === 'user') return extractTextFromContent(payload.content);
+  return '';
+}
+
 export function isRealPrompt(content: unknown): boolean {
   if (typeof content === 'string') {
     if (content.includes('<command-name>')) return false;
@@ -192,12 +270,51 @@ export function extractTextFromContent(content: unknown): string {
     for (const block of content) {
       if (block && typeof block === 'object') {
         const b = block as { type?: string; text?: string };
-        if (b.type === 'text' && typeof b.text === 'string') parts.push(b.text);
+        if ((b.type === 'text' || b.type === 'input_text' || b.type === 'output_text') && typeof b.text === 'string') parts.push(b.text);
       }
     }
     return parts.join('\n');
   }
   return '';
+}
+
+function finiteSession(path: string, firstTs: number, lastTs: number, promptCount: number, filesTouched: Set<string>): SessionMeta | null {
+  if (!Number.isFinite(firstTs) || lastTs === 0) return null;
+  return { path, firstTs, lastTs, promptCount, filesTouched };
+}
+
+function timestampOf(row: { timestamp?: string }): number {
+  if (!row.timestamp) return 0;
+  const t = Date.parse(row.timestamp);
+  return Number.isNaN(t) ? 0 : t;
+}
+
+function loadCodexSessions(repoRoot: string): SessionMeta[] {
+  // Dynamic import avoided here: session.ts is the central loader and codex.ts imports its inspectors.
+  const root = join(process.env.HOME ?? homedir(), '.codex', 'sessions');
+  if (!existsSync(root)) return [];
+  const out: SessionMeta[] = [];
+  const stack = [root];
+  while (stack.length > 0) {
+    const dir = stack.pop()!;
+    let stat;
+    try {
+      stat = lstatSync(dir);
+    } catch {
+      continue;
+    }
+    if (stat.isSymbolicLink() || !stat.isDirectory() || stat.uid !== userInfo().uid) continue;
+    for (const entry of readdirSync(dir)) {
+      const path = join(dir, entry);
+      if (entry.endsWith('.jsonl')) {
+        const meta = inspectCodexSession(path, repoRoot);
+        if (meta && meta.promptCount > 0) out.push(meta);
+      } else {
+        stack.push(path);
+      }
+    }
+  }
+  return out;
 }
 
 function overlapsRange(s: SessionMeta, range: CommitRange, graceMin: number): boolean {

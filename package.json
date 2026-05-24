@@ -1,7 +1,11 @@
 {
-  "name": "pai-provenance",
+  "name": "ai-trace",
+  "version": "0.8.0",
   "private": true,
   "type": "module",
+  "bin": {
+    "ai-trace": "./cli.ts"
+  },
   "devDependencies": {
     "bun-types": "^1.0.0"
   }

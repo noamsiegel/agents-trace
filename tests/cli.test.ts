@@ -1,7 +1,7 @@
 /**
- * provenance CLI tests.
+ * ai-trace CLI tests.
  *
- * Run: bun test ~/.pai/skills/provenance/tests/cli.test.ts
+ * Run: bun test ~/Documents/GitHub/ai-trace/tests/cli.test.ts
  *
  * These exercise the pure logic (scrubbers, prompt filtering, time overlap,
  * markdown rendering) without needing live PRs or gh authentication.
@@ -13,6 +13,7 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { encodeCwd, loadRepoSessions, type SessionMeta } from '../src/core/session.ts';
+import { loadCodexSessions } from '../src/core/codex.ts';
 import { normalizeToRepoRelative, intersectsScope } from '../src/core/scope.ts';
 import { sanitize, type ScrubRule } from '../src/core/sanitize.ts';
 
@@ -33,7 +34,7 @@ describe('CLI basics', () => {
   test('--help prints usage', () => {
     const r = runCli('--help');
     expect(r.status).toBe(0);
-    expect(r.stdout).toContain('provenance');
+    expect(r.stdout).toContain('ai-trace 0.8.0');
     expect(r.stdout).toContain('subcommands:');
   });
 
@@ -139,6 +140,59 @@ describe('collect end-to-end with synthetic session', () => {
   });
 });
 
+
+describe('Codex session adapter', () => {
+  let fakeHome: string;
+  let repo: string;
+  let origHome: string;
+
+  beforeEach(() => {
+    origHome = process.env.HOME!;
+    fakeHome = mkdtempSync(join(tmpdir(), 'codex-home-'));
+    process.env.HOME = fakeHome;
+    repo = join(fakeHome, 'repo.with.dots');
+    mkdirSync(repo, { recursive: true });
+    const sessionsDir = join(fakeHome, '.codex', 'sessions', '2026', '05', '24');
+    mkdirSync(sessionsDir, { recursive: true });
+    const now = Date.now();
+    const rows = [
+      { type: 'session_meta', timestamp: new Date(now - 3000).toISOString(), payload: { id: 's1', cwd: repo } },
+      { type: 'event_msg', timestamp: new Date(now - 2000).toISOString(), payload: { type: 'user_message', message: 'codex prompt one' } },
+      { type: 'response_item', timestamp: new Date(now - 1500).toISOString(), payload: { type: 'message', role: 'assistant', content: [{ type: 'output_text', text: 'ok' }] } },
+      { type: 'response_item', timestamp: new Date(now - 1000).toISOString(), payload: { type: 'function_call', name: 'apply_patch', arguments: JSON.stringify({ file_path: join(repo, 'src/a.ts') }) } },
+      { type: 'response_item', timestamp: new Date(now - 500).toISOString(), payload: { type: 'message', role: 'user', content: [{ type: 'input_text', text: 'codex prompt two' }] } },
+    ];
+    writeFileSync(join(sessionsDir, 'rollout-2026-05-24T00-00-00-s1.jsonl'), rows.map((r) => JSON.stringify(r)).join('\n'));
+
+    const otherRows = [
+      { type: 'session_meta', timestamp: new Date(now).toISOString(), payload: { id: 's2', cwd: join(fakeHome, 'other') } },
+      { type: 'event_msg', timestamp: new Date(now).toISOString(), payload: { type: 'user_message', message: 'wrong repo' } },
+    ];
+    writeFileSync(join(sessionsDir, 'rollout-2026-05-24T00-00-01-s2.jsonl'), otherRows.map((r) => JSON.stringify(r)).join('\n'));
+  });
+
+  afterEach(() => {
+    process.env.HOME = origHome;
+    rmSync(fakeHome, { recursive: true, force: true });
+  });
+
+  test('loadRepoSessions scans Codex sessions by recorded cwd, not Claude cwd encoding', () => {
+    const sessions = loadRepoSessions(repo, 'codex');
+
+    expect(sessions).toHaveLength(1);
+    expect(sessions[0]!.promptCount).toBe(2);
+    expect(sessions[0]!.filesTouched.has(join(repo, 'src/a.ts'))).toBe(true);
+    expect(loadCodexSessions(repo)).toHaveLength(1);
+  });
+
+  test('auto falls back to Codex when no Claude sessions exist', () => {
+    const sessions = loadRepoSessions(repo, 'auto');
+
+    expect(sessions).toHaveLength(1);
+    expect(sessions[0]!.promptCount).toBe(2);
+  });
+});
+
 describe('Scrubber semantics', () => {
   // The scrubber rules are private to the CLI, but we can test their effect
   // by passing a synthetic markdown through `collect` with a fixture session.
@@ -199,7 +253,7 @@ describe('C3 — JSONL reading rejects unsafe files', () => {
     writeFileSync(real, JSON.stringify({ type: 'user', timestamp: new Date().toISOString(), message: { content: 'evil' } }));
     spawnSync('ln', ['-s', real, join(projectsDir, encoded, 'symlinked.jsonl')]);
 
-    expect(loadRepoSessions('/fake/repo', projectsDir)).toEqual([]);
+    expect(loadRepoSessions('/fake/repo', 'claude', projectsDir)).toEqual([]);
   });
 });
 
