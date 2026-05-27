@@ -1,6 +1,6 @@
 ---
 name: agents-trace
-description: Capture Claude Code session transcripts as secret gists attached to GitHub PRs. USE WHEN user wants to attach AI trace context to a PR, run agents-trace collect/gist-create/pr-attach, or audit which sessions produced which PR.
+description: Capture AI coding session transcripts (Claude Code, Codex, OMP/Oh-My-Pi) as secret gists attached to GitHub PRs. USE WHEN user wants to attach AI trace context to a PR, run agents-trace collect/gist-create/pr-attach, or audit which sessions produced which PR.
 ---
 
 # agents-trace
@@ -45,6 +45,7 @@ agents-trace pr-attach       ← appends to PR description
 Common flags:
 - `--pr <num>` — target PR (default: current branch's open PR via `gh`)
 - `--base <ref>` — base ref for session-scoping (default: PR base branch)
+- `--source <claude|codex|omp|auto>` — session source. `auto` (default) tries claude, then codex, then omp.
 - `--include-code` — include code blocks (default: omit)
 - `--dry-run` — print what would happen; create no gist
 - `--no-attach` — gist-create only; do not edit the PR

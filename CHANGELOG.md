@@ -1,6 +1,15 @@
 # Changelog
 ## [Unreleased]
 
+## [0.10.0] \u2014 OMP source support + gh gist fix
+
+### Added
+- `--source omp` for OMP (Oh-My-Pi) session JSONLs at `~/.omp/agent/sessions/<encoded-cwd>/*.jsonl`. Same parse + filter semantics as the existing `--source claude|codex` paths: filters by recorded `cwd` in the session header, extracts `type=message + message.role=user + message.attribution=user` rows as prompts, picks up `file_path` keys from tool_use blocks.
+- `auto` source now falls through claude \u2192 codex \u2192 omp.
+
+### Fixed
+- `gh gist create` no longer passes the unrecognized `--secret` flag. Secret is the default; only `--public` overrides. Without this fix every `pr-attach` failed with "unknown flag: --secret".
+
 ### Changed
 - Rebranded ai-trace to agents-trace: binary, package name, PR marker (`🤖 agents-trace:`), config dir `~/.config/agents-trace`, Homebrew formula `noamsiegel/tap/agents-trace`, GitHub repo `noamsiegel/agents-trace`, and PAI skill path `~/.pai/skills/agents-trace`. No backward compatibility with ai-trace.
 - Bumped version to `0.9.0`.

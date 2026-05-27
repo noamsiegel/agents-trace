@@ -70,8 +70,10 @@ describe('GhClient', () => {
 
     expect(gist).toEqual({ id: 'def456', url: 'https://gist.github.com/def456' });
     expect(runner.calls[0]!.args.slice(0, 5)).toEqual(['gist', 'edit', 'abc123', '--filename', 'pr-5.md']);
-    expect(runner.calls[1]!.args.slice(0, 4)).toEqual(['gist', 'create', '--secret', '--filename']);
-    expect(runner.calls[1]!.args[4]).toBe('pr-5.md');
+    // gh gist create defaults to secret; we only pass --public when explicitly requested.
+    expect(runner.calls[1]!.args.slice(0, 3)).toEqual(['gist', 'create', '--filename']);
+    expect(runner.calls[1]!.args[3]).toBe('pr-5.md');
+    expect(runner.calls[1]!.args).not.toContain('--secret');
   });
 
   test('writeAgentsTraceLink replaces only marker URL and preserves other body content', async () => {

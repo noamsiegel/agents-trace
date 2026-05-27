@@ -14,6 +14,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { encodeCwd, loadRepoSessions, type SessionMeta } from '../src/core/session.ts';
 import { loadCodexSessions } from '../src/core/codex.ts';
+import { loadOmpSessions } from '../src/core/omp.ts';
 import { normalizeToRepoRelative, intersectsScope } from '../src/core/scope.ts';
 import { sanitize, type ScrubRule } from '../src/core/sanitize.ts';
 
@@ -34,7 +35,7 @@ describe('CLI basics', () => {
   test('--help prints usage', () => {
     const r = runCli('--help');
     expect(r.status).toBe(0);
-    expect(r.stdout).toContain('agents-trace 0.9.0');
+    expect(r.stdout).toContain('agents-trace 0.10.0');
     expect(r.stdout).toContain('subcommands:');
   });
 
@@ -190,6 +191,98 @@ describe('Codex session adapter', () => {
 
     expect(sessions).toHaveLength(1);
     expect(sessions[0]!.promptCount).toBe(2);
+  });
+});
+
+describe('OMP session adapter', () => {
+  let fakeHome: string;
+  let repo: string;
+  let origHome: string;
+
+  beforeEach(() => {
+    origHome = process.env.HOME!;
+    fakeHome = mkdtempSync(join(tmpdir(), 'omp-home-'));
+    process.env.HOME = fakeHome;
+    repo = join(fakeHome, 'omp-repo');
+    mkdirSync(repo, { recursive: true });
+    // OMP encodes cwd as `<home-relative>` with `/` -> `-`. Use any name; the
+    // header row's `cwd` field is authoritative for filtering.
+    const sessionsDir = join(fakeHome, '.omp', 'agent', 'sessions', '-omp-repo');
+    mkdirSync(sessionsDir, { recursive: true });
+    const now = Date.now();
+    const rows = [
+      { type: 'session', version: 3, id: 'sess-1', timestamp: new Date(now - 4000).toISOString(), cwd: repo, title: 'fixture', titleSource: 'manual' },
+      { type: 'model_change', id: 'm1', parentId: null, timestamp: new Date(now - 3500).toISOString(), model: 'test-model' },
+      { type: 'message', id: 'p1', parentId: 'm1', timestamp: new Date(now - 3000).toISOString(), message: { role: 'user', attribution: 'user', content: [{ type: 'text', text: 'omp prompt one mentioning ' + join(repo, 'src/a.ts') }] } },
+      { type: 'message', id: 'a1', parentId: 'p1', timestamp: new Date(now - 2500).toISOString(), message: { role: 'assistant', content: [{ type: 'text', text: 'ok' }, { type: 'tool_use', name: 'edit', input: { file_path: join(repo, 'src/a.ts') } }] } },
+      { type: 'message', id: 'tr1', parentId: 'a1', timestamp: new Date(now - 2000).toISOString(), message: { role: 'toolResult', content: 'tool output' } },
+      { type: 'message', id: 'p2', parentId: 'tr1', timestamp: new Date(now - 1500).toISOString(), message: { role: 'user', attribution: 'user', content: [{ type: 'text', text: 'omp prompt two' }] } },
+      // Synthetic developer/agent rows should NOT count as user prompts.
+      { type: 'message', id: 'd1', parentId: 'p2', timestamp: new Date(now - 1000).toISOString(), message: { role: 'developer', attribution: 'agent', content: [{ type: 'text', text: 'system reminder injected' }] } },
+    ];
+    writeFileSync(join(sessionsDir, '2026-05-24T00-00-00-000Z_sess-1.jsonl'), rows.map((r) => JSON.stringify(r)).join('\n'));
+
+    // A different-cwd session in a sibling encoded-dir; should be filtered out.
+    const otherDir = join(fakeHome, '.omp', 'agent', 'sessions', '-other-repo');
+    mkdirSync(otherDir, { recursive: true });
+    const otherRepo = join(fakeHome, 'other-repo');
+    const otherRows = [
+      { type: 'session', version: 3, id: 'sess-2', timestamp: new Date(now).toISOString(), cwd: otherRepo, title: 'wrong' },
+      { type: 'message', id: 'p3', timestamp: new Date(now).toISOString(), message: { role: 'user', attribution: 'user', content: [{ type: 'text', text: 'wrong repo' }] } },
+    ];
+    writeFileSync(join(otherDir, '2026-05-24T00-00-01-000Z_sess-2.jsonl'), otherRows.map((r) => JSON.stringify(r)).join('\n'));
+  });
+
+  afterEach(() => {
+    process.env.HOME = origHome;
+    rmSync(fakeHome, { recursive: true, force: true });
+  });
+
+  test('loadOmpSessions filters by recorded cwd in the session header', () => {
+    const sessions = loadOmpSessions(repo);
+    expect(sessions).toHaveLength(1);
+    expect(sessions[0]!.promptCount).toBe(2);
+  });
+
+  test('loadRepoSessions with --source omp returns only matching repo', () => {
+    const sessions = loadRepoSessions(repo, 'omp');
+    expect(sessions).toHaveLength(1);
+    expect(sessions[0]!.promptCount).toBe(2);
+  });
+
+  test('developer/agent attribution rows are NOT counted as user prompts', () => {
+    // The fixture has 1 developer/agent row; it must not appear in promptCount.
+    const sessions = loadOmpSessions(repo);
+    expect(sessions).toHaveLength(1);
+    expect(sessions[0]!.promptCount).toBe(2); // not 3
+  });
+
+  test('extractFilePaths picks up file_path from assistant tool_use blocks', () => {
+    const sessions = loadOmpSessions(repo);
+    expect(sessions).toHaveLength(1);
+    expect(sessions[0]!.filesTouched.has(join(repo, 'src/a.ts'))).toBe(true);
+  });
+
+  test('auto falls back to OMP when neither Claude nor Codex sessions exist', () => {
+    const sessions = loadRepoSessions(repo, 'auto');
+    expect(sessions).toHaveLength(1);
+    expect(sessions[0]!.promptCount).toBe(2);
+  });
+
+  test('sessions-since CLI with --source omp counts prompts correctly', () => {
+    // Initialize a tiny git repo at `repo` and commit so `sessions-since main` has a base.
+    spawnSync('git', ['-C', repo, 'init', '-q', '-b', 'main'], { encoding: 'utf8' });
+    spawnSync('git', ['-C', repo, 'config', 'user.email', 'test@local'], { encoding: 'utf8' });
+    spawnSync('git', ['-C', repo, 'config', 'user.name', 'test'], { encoding: 'utf8' });
+    writeFileSync(join(repo, 'a'), 'a\n');
+    spawnSync('git', ['-C', repo, 'add', 'a'], { encoding: 'utf8' });
+    spawnSync('git', ['-C', repo, 'commit', '-q', '-m', 'init'], { encoding: 'utf8' });
+    const r = spawnSync('bun', [CLI, 'sessions-since', 'main', '--source', 'omp', '--root', repo, '--scope', 'time'], {
+      encoding: 'utf8',
+      env: { ...process.env, HOME: fakeHome },
+    });
+    expect(r.status).toBe(0);
+    expect(r.stdout).toContain('prompts=2');
   });
 });
 

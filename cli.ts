@@ -4,7 +4,7 @@
  * attached to a GitHub PR.
  *
  * Subcommands:
- *   collect [--pr N] [--base REF] [--source auto|claude|codex]
+ *   collect [--pr N] [--base REF] [--source auto|claude|codex|omp]
  *       Print cleaned markdown for sessions overlapping the PR's commits.
  *   sessions-since <ref>
  *       List sessions whose timestamps overlap commits since <ref>.
@@ -35,7 +35,7 @@ import { collectMarkdown, loadScrubbers, sanitize, type ScrubRule } from './src/
 import { GhClient, type PrContext } from './src/adapters/gh-client.ts';
 import { GitleaksRunner } from './src/adapters/gitleaks.ts';
 
-const VERSION = '0.9.0';
+const VERSION = '0.10.0';
 
 export interface Args {
   pr?: string;
@@ -89,8 +89,8 @@ function parseArgs(argv: string[]): Args {
         break;
       case '--source':
         const source = argv[++i];
-        if (source !== 'claude' && source !== 'codex' && source !== 'auto') {
-          die(`--source must be one of: claude, codex, auto (got: ${source})`);
+        if (source !== 'claude' && source !== 'codex' && source !== 'omp' && source !== 'auto') {
+          die(`--source must be one of: claude, codex, omp, auto (got: ${source})`);
         }
         args.source = source;
         break;
@@ -161,7 +161,7 @@ flags:
                       'both' = intersection of time AND file overlap (most precise).
                       'file' = only sessions that touched files in the PR diff.
                       'time' = only time-overlap (broader, the v0.1.0 default).
-  --source <source>   Session source: auto | claude | codex (default: auto).
+  --source <source>   Session source: auto | claude | codex | omp (default: auto).
   --include-code      Include code blocks (default: omit).
   --dry-run           Print what would happen; do not create gist.
   --no-attach         Create gist but don't edit the PR.

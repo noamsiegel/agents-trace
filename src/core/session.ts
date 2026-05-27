@@ -33,13 +33,16 @@ export function encodeCwd(p: string): string {
   return p.replaceAll('/', '-').replaceAll('.', '-');
 }
 
-export type SessionSource = 'claude' | 'codex' | 'auto';
+export type SessionSource = 'claude' | 'codex' | 'omp' | 'auto';
 
 export function loadRepoSessions(repoRoot: string, source: SessionSource = 'auto', claudeRoot = join(process.env.HOME ?? homedir(), '.claude', 'projects')): SessionMeta[] {
   if (source === 'codex') return loadCodexSessions(repoRoot);
+  if (source === 'omp') return loadOmpSessions(repoRoot);
   const claudeSessions = loadClaudeSessions(repoRoot, claudeRoot);
   if (source === 'claude' || claudeSessions.length > 0) return claudeSessions;
-  return loadCodexSessions(repoRoot);
+  const codexSessions = loadCodexSessions(repoRoot);
+  if (codexSessions.length > 0) return codexSessions;
+  return loadOmpSessions(repoRoot);
 }
 
 export function loadClaudeSessions(repoRoot: string, claudeRoot: string): SessionMeta[] {
@@ -145,6 +148,53 @@ export function inspectCodexSession(path: string, repoRoot: string): SessionMeta
   return finiteSession(path, firstTs, lastTs, promptCount, filesTouched);
 }
 
+export function inspectOmpSession(path: string, repoRoot: string): SessionMeta | null {
+  // OMP (Oh-My-Pi) session JSONL.
+  //
+  // Header row: { type: "session", id, timestamp, cwd: "...", title }
+  // User prompts: { type: "message", timestamp, message: { role: "user", attribution: "user", content: [{type: "text", text: "..."}] } }
+  // Other roles seen (NOT prompts): toolResult, assistant, developer (with attribution: "agent").
+  //
+  // OMP encodes the cwd in the parent directory name, but the encoding does not
+  // round-trip (HOME prefix is stripped, dots are preserved). The session header
+  // row is the authoritative source for cwd \u2014 same approach codex uses.
+  const content = safeReadJsonl(path);
+  if (content === null) return null;
+  let cwd: string | null = null;
+  let firstTs = Number.POSITIVE_INFINITY;
+  let lastTs = 0;
+  let promptCount = 0;
+  let rowCount = 0;
+  const filesTouched = new Set<string>();
+
+  for (const line of content.split('\n')) {
+    if (++rowCount > MAX_JSONL_ROWS) break;
+    if (!line.trim()) continue;
+    let row: { type?: string; timestamp?: string; cwd?: string; message?: unknown };
+    try {
+      row = JSON.parse(line);
+    } catch {
+      continue;
+    }
+
+    const t = timestampOf(row);
+    if (t !== 0) {
+      if (t < firstTs) firstTs = t;
+      if (t > lastTs) lastTs = t;
+    }
+
+    if (row.type === 'session' && typeof row.cwd === 'string') {
+      cwd = resolve(row.cwd);
+    }
+
+    if (isPromptRow(row)) promptCount++;
+    extractFilePaths(row, filesTouched);
+  }
+
+  if (cwd === null || cwd !== resolve(repoRoot)) return null;
+  return finiteSession(path, firstTs, lastTs, promptCount, filesTouched);
+}
+
 export function extractFilePaths(row: unknown, out: Set<string>): void {
   if (!row || typeof row !== 'object') return;
   const stack: unknown[] = [row];
@@ -242,6 +292,14 @@ export function extractPromptText(row: unknown): string {
 
   if (r.type === 'user') return extractTextFromContent(r.message?.content);
 
+  // OMP shape: { type: "message", message: { role: "user", attribution: "user", content: [...] } }
+  if (r.type === 'message' && r.message && typeof r.message === 'object') {
+    const msg = r.message as { role?: string; content?: unknown; attribution?: string };
+    if (msg.role === 'user' && (msg.attribution === undefined || msg.attribution === 'user')) {
+      return extractTextFromContent(msg.content);
+    }
+  }
+
   const payload = r.payload && typeof r.payload === 'object' ? r.payload as { type?: string; role?: string; message?: string; content?: unknown } : null;
   if (!payload) return '';
 
@@ -308,6 +366,34 @@ function loadCodexSessions(repoRoot: string): SessionMeta[] {
       const path = join(dir, entry);
       if (entry.endsWith('.jsonl')) {
         const meta = inspectCodexSession(path, repoRoot);
+        if (meta && meta.promptCount > 0) out.push(meta);
+      } else {
+        stack.push(path);
+      }
+    }
+  }
+  return out;
+}
+
+function loadOmpSessions(repoRoot: string): SessionMeta[] {
+  // Same dispatch pattern as loadCodexSessions to avoid circular imports with omp.ts.
+  const root = join(process.env.HOME ?? homedir(), '.omp', 'agent', 'sessions');
+  if (!existsSync(root)) return [];
+  const out: SessionMeta[] = [];
+  const stack = [root];
+  while (stack.length > 0) {
+    const dir = stack.pop()!;
+    let stat;
+    try {
+      stat = lstatSync(dir);
+    } catch {
+      continue;
+    }
+    if (stat.isSymbolicLink() || !stat.isDirectory() || stat.uid !== userInfo().uid) continue;
+    for (const entry of readdirSync(dir)) {
+      const path = join(dir, entry);
+      if (entry.endsWith('.jsonl')) {
+        const meta = inspectOmpSession(path, repoRoot);
         if (meta && meta.promptCount > 0) out.push(meta);
       } else {
         stack.push(path);

@@ -63,7 +63,12 @@ export class GhClient {
       }
     }
 
-    const created = await this.runner.run('gh', ['gist', 'create', public_ ? '--public' : '--secret', '--filename', this.filenameFromDescription(description), tmpFile]);
+    // `gh gist create` defaults to secret. The CLI rejects `--secret` as an unknown flag,
+    // so we only pass `--public` when explicitly requested.
+    const gistArgs = ['gist', 'create'];
+    if (public_) gistArgs.push('--public');
+    gistArgs.push('--filename', this.filenameFromDescription(description), tmpFile);
+    const created = await this.runner.run('gh', gistArgs);
     if (created.status !== 0) {
       throw new Error(`gh gist create failed: ${created.stderr.trim()}`);
     }
