@@ -210,11 +210,11 @@ function resolveAllRoots(repoRoot: string): string[] {
 }
 
 // Load sessions across all worktree roots, deduplicating by session file path.
-function loadAllRootSessions(roots: string[], source: SessionSource): SessionMeta[] {
+function loadAllRootSessions(roots: string[], source: SessionSource, notBefore = 0): SessionMeta[] {
   const seen = new Set<string>();
   const out: SessionMeta[] = [];
   for (const r of roots) {
-    for (const s of loadRepoSessions(r, source)) {
+    for (const s of loadRepoSessions(r, source, undefined, notBefore)) {
       if (seen.has(s.path)) continue;
       seen.add(s.path);
       out.push(s);
@@ -274,11 +274,25 @@ function selectWithScopeFallback(
 }
 
 
+/**
+ * Oldest transcript mtime that can still matter for this range.
+ *
+ * The grace window is what `selectSessionsForRange` already allows on either side of the
+ * commit timestamps, so subtracting it here keeps the prefilter strictly looser than the
+ * selector it feeds: anything the selector could accept, the filter keeps. A second margin
+ * covers clock skew between the committer and the local filesystem, which is cheap insurance
+ * against dropping a session over a few seconds of drift.
+ */
+function sessionCutoff(range: CommitRange, graceMin: number): number {
+  const CLOCK_SKEW_MS = 60 * 60 * 1000;
+  return range.min - graceMin * 60 * 1000 - CLOCK_SKEW_MS;
+}
+
 async function cmdCollect(args: Args, scrubbers: ScrubRule[] = loadScrubbers()) {
   const repoRoot = detectRepoRoot(args.root);
   const pr = await detectPr(args, repoRoot);
   const range = getCommitTimestampsForRange(`origin/${pr.baseRef}`, repoRoot);
-  const all = loadAllRootSessions(resolveAllRoots(repoRoot), args.source);
+  const all = loadAllRootSessions(resolveAllRoots(repoRoot), args.source, sessionCutoff(range, args.graceMin));
   const diffFiles = args.scope !== 'time' ? getDiffFilesForRange(`origin/${pr.baseRef}`, repoRoot) : new Set<string>();
   const overlapping = selectWithScopeFallback(all, pr.baseRef, repoRoot, range, diffFiles, args.graceMin, args.scope);
   const md = collectMarkdown(repoRoot, pr.number, pr.baseRef, overlapping, {
@@ -293,7 +307,7 @@ function cmdSessionsSince(args: Args) {
   if (!ref) die('usage: agents-trace sessions-since <ref>', 2);
   const repoRoot = detectRepoRoot(args.root);
   const range = getCommitTimestampsForRange(ref, repoRoot);
-  const all = loadAllRootSessions(resolveAllRoots(repoRoot), args.source);
+  const all = loadAllRootSessions(resolveAllRoots(repoRoot), args.source, sessionCutoff(range, args.graceMin));
   const diffFiles = args.scope !== 'time' ? getDiffFilesForRange(ref, repoRoot) : new Set<string>();
   const overlapping = selectWithScopeFallback(all, ref, repoRoot, range, diffFiles, args.graceMin, args.scope);
   if (overlapping.length === 0) {
@@ -319,7 +333,7 @@ export async function cmdGistCreate(
   const pr = await detectPr(args, repoRoot, client);
   const range = getCommitTimestampsForRange(`origin/${pr.baseRef}`, repoRoot);
   const diffFiles = args.scope !== 'time' ? getDiffFilesForRange(`origin/${pr.baseRef}`, repoRoot) : new Set<string>();
-  const overlapping = selectWithScopeFallback(loadAllRootSessions(resolveAllRoots(repoRoot), args.source), pr.baseRef, repoRoot, range, diffFiles, args.graceMin, args.scope);
+  const overlapping = selectWithScopeFallback(loadAllRootSessions(resolveAllRoots(repoRoot), args.source, sessionCutoff(range, args.graceMin)), pr.baseRef, repoRoot, range, diffFiles, args.graceMin, args.scope);
   if (overlapping.length === 0) {
     die(`no sessions overlap commits in origin/${pr.baseRef}..HEAD (PR #${pr.number})`);
   }

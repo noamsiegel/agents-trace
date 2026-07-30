@@ -29,6 +29,37 @@ export interface RangeSelectionScope {
   diffFiles: string[] | Set<string>;
 }
 
+/**
+ * Cheap prefilter: can this transcript possibly contain a row at or after `notBefore`?
+ *
+ * Every `inspect*Session` reads its whole file to find the first and last timestamps. On a
+ * machine that keeps its history that is the dominant cost of every run - measured at 173 of
+ * 188 seconds for one PR, across ~18,600 files and ~15.5 GB, growing with every session ever
+ * recorded.
+ *
+ * A file's mtime is the time of its LAST write, so mtime is an upper bound on the timestamp
+ * of every row inside it. If that bound falls before the window, no row in the file can be in
+ * the window, and the file can be skipped without reading it. The comparison is sound in one
+ * direction only, which is the direction that matters: it can keep a file it did not need to
+ * (mtime recent, rows old), but it can never drop one it needed.
+ *
+ * `notBefore = 0` disables the filter, for callers with no range (handoff).
+ *
+ * Shared rather than inlined because all three loaders (claude, codex, omp) must apply the
+ * identical bound: a copy that drifted would silently drop sessions from the record, and a
+ * one-sided comparison duplicated three times is precisely how that happens.
+ */
+export function isOlderThan(path: string, notBefore: number): boolean {
+  if (notBefore <= 0) return false;
+  try {
+    return lstatSync(path).mtimeMs < notBefore;
+  } catch {
+    // Unreadable stat is not evidence of age. Fall through and let the reader decide, so a
+    // permissions oddity cannot silently erase a session from the record.
+    return false;
+  }
+}
+
 export function encodeCwd(p: string): string {
   return p.replaceAll('/', '-').replaceAll('.', '-');
 }
@@ -46,17 +77,28 @@ export function pathsEquivalent(a: string, b: string): boolean {
 
 export type SessionSource = 'claude' | 'codex' | 'omp' | 'auto';
 
-export function loadRepoSessions(repoRoot: string, source: SessionSource = 'auto', claudeRoot = join(process.env.HOME ?? homedir(), '.claude', 'projects')): SessionMeta[] {
-  if (source === 'codex') return loadCodexSessions(repoRoot);
-  if (source === 'omp') return loadOmpSessions(repoRoot);
-  const claudeSessions = loadClaudeSessions(repoRoot, claudeRoot);
-  if (source === 'claude' || claudeSessions.length > 0) return claudeSessions;
-  const codexSessions = loadCodexSessions(repoRoot);
-  if (codexSessions.length > 0) return codexSessions;
-  return loadOmpSessions(repoRoot);
+export function loadRepoSessions(repoRoot: string, source: SessionSource = 'auto', claudeRoot = join(process.env.HOME ?? homedir(), '.claude', 'projects'), notBefore = 0): SessionMeta[] {
+  if (source === 'codex') return loadCodexSessions(repoRoot, notBefore);
+  if (source === 'omp') return loadOmpSessions(repoRoot, notBefore);
+  if (source === 'claude') return loadClaudeSessions(repoRoot, claudeRoot, notBefore);
+
+  // `auto` used to return the first source that had ANY sessions, which let stale history from
+  // one tool hide the current work of another. On this machine four old Claude transcripts for
+  // a repo shadowed 409 OMP sessions: none of the four overlapped the commit range, so every
+  // run reported "no overlapping sessions" while the sessions that did overlap were never
+  // loaded. That is the reason no PR here had ever received a transcript.
+  //
+  // Which sessions belong to a commit range is decided by the overlap test downstream, not by
+  // which tool happened to write something first, so `auto` now offers all of them. Paths are
+  // distinct per source, and `loadAllRootSessions` dedupes by path across roots.
+  return [
+    ...loadClaudeSessions(repoRoot, claudeRoot, notBefore),
+    ...loadCodexSessions(repoRoot, notBefore),
+    ...loadOmpSessions(repoRoot, notBefore),
+  ];
 }
 
-export function loadClaudeSessions(repoRoot: string, claudeRoot: string): SessionMeta[] {
+export function loadClaudeSessions(repoRoot: string, claudeRoot: string, notBefore = 0): SessionMeta[] {
   const encoded = encodeCwd(repoRoot);
   const dir = join(claudeRoot, encoded);
   if (!existsSync(dir)) return [];
@@ -74,6 +116,7 @@ export function loadClaudeSessions(repoRoot: string, claudeRoot: string): Sessio
   const out: SessionMeta[] = [];
   for (const f of files) {
     const fp = join(dir, f);
+    if (isOlderThan(fp, notBefore)) continue;
     const meta = inspectSession(fp);
     if (meta && meta.promptCount > 0) out.push(meta);
   }
@@ -412,7 +455,7 @@ function timestampOf(row: { timestamp?: string }): number {
   return Number.isNaN(t) ? 0 : t;
 }
 
-function loadCodexSessions(repoRoot: string): SessionMeta[] {
+function loadCodexSessions(repoRoot: string, notBefore = 0): SessionMeta[] {
   // Dynamic import avoided here: session.ts is the central loader and codex.ts imports its inspectors.
   const root = join(process.env.HOME ?? homedir(), '.codex', 'sessions');
   if (!existsSync(root)) return [];
@@ -430,6 +473,7 @@ function loadCodexSessions(repoRoot: string): SessionMeta[] {
     for (const entry of readdirSync(dir)) {
       const path = join(dir, entry);
       if (entry.endsWith('.jsonl')) {
+        if (isOlderThan(path, notBefore)) continue;
         const meta = inspectCodexSession(path, repoRoot);
         if (meta && meta.promptCount > 0) out.push(meta);
       } else {
@@ -440,7 +484,7 @@ function loadCodexSessions(repoRoot: string): SessionMeta[] {
   return out;
 }
 
-function loadOmpSessions(repoRoot: string): SessionMeta[] {
+function loadOmpSessions(repoRoot: string, notBefore = 0): SessionMeta[] {
   // Same dispatch pattern as loadCodexSessions to avoid circular imports with omp.ts.
   const root = join(process.env.HOME ?? homedir(), '.omp', 'agent', 'sessions');
   if (!existsSync(root)) return [];
@@ -458,6 +502,7 @@ function loadOmpSessions(repoRoot: string): SessionMeta[] {
     for (const entry of readdirSync(dir)) {
       const path = join(dir, entry);
       if (entry.endsWith('.jsonl')) {
+        if (isOlderThan(path, notBefore)) continue;
         const meta = inspectOmpSession(path, repoRoot);
         if (meta && meta.promptCount > 0) out.push(meta);
       } else {

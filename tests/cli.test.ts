@@ -9,7 +9,7 @@
 
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
 import { spawnSync } from 'node:child_process';
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, rmSync, utimesSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { encodeCwd, loadRepoSessions, type SessionMeta } from '../src/core/session.ts';
@@ -275,10 +275,57 @@ describe('OMP session adapter', () => {
     expect(sessions[0]!.filesTouched.has(join(repo, 'src/a.ts'))).toBe(true);
   });
 
+  test('a transcript older than the cutoff is skipped without being read', () => {
+    // The prefilter exists because inspect*Session reads every byte of every transcript to
+    // find its timestamps: measured at 173 of 188 seconds for one PR, over ~18,600 files and
+    // ~15.5 GB. mtime is the time of the last write, so it is an upper bound on every row
+    // inside, and a file whose bound precedes the window cannot contribute to it.
+    const sessionFile = join(fakeHome, '.omp', 'agent', 'sessions', '-omp-repo', '2026-05-24T00-00-00-000Z_sess-1.jsonl');
+    const aMonthAgo = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000);
+    utimesSync(sessionFile, aMonthAgo, aMonthAgo);
+    const anHourAgo = Date.now() - 60 * 60 * 1000;
+
+    expect(loadOmpSessions(repo, undefined, anHourAgo)).toHaveLength(0);
+    // Sound in one direction only: the same file must still load with the filter disabled,
+    // proving the skip is the cutoff's doing and not a broken fixture.
+    expect(loadOmpSessions(repo, undefined, 0)).toHaveLength(1);
+  });
+
+  test('a transcript inside the window survives the cutoff', () => {
+    // The direction that would be silent data loss: too aggressive a cutoff drops sessions
+    // that genuinely belong to the PR, and the run reports "no overlapping sessions" instead
+    // of failing, so nobody learns the transcript was dropped.
+    const anHourAgo = Date.now() - 60 * 60 * 1000;
+    expect(loadOmpSessions(repo, undefined, anHourAgo)).toHaveLength(1);
+    expect(loadRepoSessions(repo, 'omp', undefined, anHourAgo)).toHaveLength(1);
+  });
+
   test('auto falls back to OMP when neither Claude nor Codex sessions exist', () => {
     const sessions = loadRepoSessions(repo, 'auto');
     expect(sessions).toHaveLength(1);
     expect(sessions[0]!.promptCount).toBe(2);
+  });
+
+  test('auto does not let a Claude transcript hide OMP sessions', () => {
+    // The bug that made this tool produce nothing on a machine with both histories: `auto`
+    // returned the FIRST source that had any sessions, so four stale Claude transcripts for a
+    // repo shadowed 409 OMP sessions. None of the four overlapped the commit range, so every
+    // run reported "no overlapping sessions" and no PR ever got a transcript - while the OMP
+    // sessions that did overlap were never even loaded.
+    const claudeRoot = join(fakeHome, '.claude', 'projects');
+    const claudeDir = join(claudeRoot, encodeCwd(repo));
+    mkdirSync(claudeDir, { recursive: true });
+    const stale = Date.now() - 90 * 24 * 60 * 60 * 1000;
+    const claudeRows = [
+      { type: 'user', timestamp: new Date(stale).toISOString(), cwd: repo, message: { role: 'user', content: 'an old claude prompt' } },
+      { type: 'user', timestamp: new Date(stale + 1000).toISOString(), cwd: repo, message: { role: 'user', content: 'another old claude prompt' } },
+    ];
+    writeFileSync(join(claudeDir, 'stale.jsonl'), claudeRows.map((r) => JSON.stringify(r)).join('\n'));
+
+    const sessions = loadRepoSessions(repo, 'auto', claudeRoot);
+    const paths = sessions.map((s) => s.path);
+    expect(paths.some((p) => p.includes('.omp'))).toBe(true);
+    expect(paths.some((p) => p.includes('.claude'))).toBe(true);
   });
 
   test('sessions-since CLI with --source omp counts prompts correctly', () => {

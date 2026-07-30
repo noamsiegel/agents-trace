@@ -1,7 +1,7 @@
 import { existsSync, lstatSync, readdirSync } from 'node:fs';
 import { homedir, userInfo } from 'node:os';
 import { join, resolve } from 'node:path';
-import { inspectOmpSession, type SessionMeta } from './session.ts';
+import { inspectOmpSession, isOlderThan, type SessionMeta } from './session.ts';
 
 /**
  * Load OMP (Oh-My-Pi) session metadata for sessions whose recorded cwd matches `repoRoot`.
@@ -15,12 +15,14 @@ import { inspectOmpSession, type SessionMeta } from './session.ts';
 export function loadOmpSessions(
 	repoRoot: string,
 	sessionsRoot = join(process.env.HOME ?? homedir(), '.omp', 'agent', 'sessions'),
+	notBefore = 0,
 ): SessionMeta[] {
 	const root = resolve(repoRoot);
 	const files = listJsonlFiles(sessionsRoot);
 	const out: SessionMeta[] = [];
 
 	for (const file of files) {
+		if (isOlderThan(file, notBefore)) continue;
 		const meta = inspectOmpSession(file, root);
 		if (meta && meta.promptCount > 0) out.push(meta);
 	}

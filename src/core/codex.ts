@@ -1,14 +1,15 @@
 import { existsSync, lstatSync, readdirSync } from 'node:fs';
 import { homedir, userInfo } from 'node:os';
 import { join, resolve } from 'node:path';
-import { inspectCodexSession, type SessionMeta } from './session.ts';
+import { inspectCodexSession, isOlderThan, type SessionMeta } from './session.ts';
 
-export function loadCodexSessions(repoRoot: string, sessionsRoot = join(process.env.HOME ?? homedir(), '.codex', 'sessions')): SessionMeta[] {
+export function loadCodexSessions(repoRoot: string, sessionsRoot = join(process.env.HOME ?? homedir(), '.codex', 'sessions'), notBefore = 0): SessionMeta[] {
   const root = resolve(repoRoot);
   const files = listJsonlFiles(sessionsRoot);
   const out: SessionMeta[] = [];
 
   for (const file of files) {
+    if (isOlderThan(file, notBefore)) continue;
     const meta = inspectCodexSession(file, root);
     if (meta && meta.promptCount > 0) out.push(meta);
   }
