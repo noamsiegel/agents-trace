@@ -440,21 +440,16 @@ function cmdHandoff(args: Args, scrubbers: ScrubRule[] = loadScrubbers()) {
 
   const prompts: { ts: number; text: string }[] = [];
   const toolUseCounts: Record<string, number> = {};
-  for (const line of content.split('\n')) {
-    if (!line.trim()) continue;
-    let row: { type?: string; timestamp?: string; message?: { content?: unknown } };
-    try {
-      row = JSON.parse(line);
-    } catch {
-      continue;
-    }
+  for (const row of content) {
     if (isPromptRow(row)) {
-      const ts = row.timestamp ? Date.parse(row.timestamp) : 0;
+      const ts = typeof row.timestamp === 'string' ? Date.parse(row.timestamp) : 0;
       const text = extractPromptText(row).trim();
       prompts.push({ ts, text });
+      if (prompts.length > lastN) prompts.shift();
     }
-    if (row.type === 'assistant' && Array.isArray(row.message?.content)) {
-      for (const block of row.message.content as unknown[]) {
+    const message = row.message !== null && typeof row.message === 'object' ? row.message as { content?: unknown } : null;
+    if (row.type === 'assistant' && Array.isArray(message?.content)) {
+      for (const block of message.content) {
         if (block && typeof block === 'object') {
           const b = block as { type?: string; name?: string };
           if (b.type === 'tool_use' && b.name) {
