@@ -33,8 +33,10 @@ Use this checklist from a clean `main` checkout.
    system formula_opt_bin("bun")/"bun", "install", "--production", "--frozen-lockfile"
    system formula_opt_bin("bun")/"bun", "run", "build"
    libexec.install "dist/cli.js"
+   libexec.install "node_modules/acorn/LICENSE" => "acorn-LICENSE"
    ```
-   Point the wrapper at `#{libexec}/cli.js` and run the formula's audit/install/test
+   Point the wrapper at `bun --no-install #{libexec}/cli.js` so a missing bundled
+   dependency cannot be fetched implicitly. Run the formula's audit/install/test
    checks. The bundle must also pass a file-scope collection smoke test outside
    the source checkout.
 7. PAI's skill is a usage pointer to Homebrew, not a vendored code mirror. Do not
