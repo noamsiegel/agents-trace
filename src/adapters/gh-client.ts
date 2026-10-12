@@ -8,6 +8,10 @@ export type RepoVisibility = 'PUBLIC' | 'PRIVATE' | 'INTERNAL' | 'UNKNOWN';
 export interface PrContext {
   number: number;
   baseRef: string;
+  /** Tip of the base branch and the PR's head commit, as GitHub has them. The PR's commits are
+   *  baseRefOid..headRefOid, independent of whatever the local checkout has checked out. */
+  baseRefOid: string;
+  headRefOid: string;
   visibility: RepoVisibility;
   nameWithOwner: string;
 }
@@ -20,14 +24,14 @@ export class GhClient {
   constructor(private runner: CommandRunner = realRunner) {}
 
   async readPrContext(repoRoot: string, branch?: string): Promise<PrContext> {
-    const fields = 'number,baseRefName,headRepository';
+    const fields = 'number,baseRefName,baseRefOid,headRefOid,headRepository';
     const args = branch ? ['pr', 'view', this.parsePrNumber(branch), '--json', fields] : ['pr', 'view', '--json', fields];
     const meta = await this.runner.run('gh', args, { cwd: repoRoot });
     if (meta.status !== 0) {
       throw new Error(branch ? `gh pr view ${this.parsePrNumber(branch)} failed: ${meta.stderr.trim()}` : `no PR for current branch (run with --pr <num>): ${meta.stderr.trim()}`);
     }
 
-    const data = JSON.parse(meta.stdout) as { number: number; baseRefName: string; headRepository?: { nameWithOwner?: string } };
+    const data = JSON.parse(meta.stdout) as { number: number; baseRefName: string; baseRefOid: string; headRefOid: string; headRepository?: { nameWithOwner?: string } };
     const repo = data.headRepository?.nameWithOwner ?? '';
     const visMeta = await this.runner.run('gh', ['repo', 'view', repo, '--json', 'visibility,nameWithOwner'], { cwd: repoRoot });
     const visData = visMeta.status === 0 ? (JSON.parse(visMeta.stdout) as { visibility?: RepoVisibility; nameWithOwner?: string }) : null;
@@ -35,6 +39,8 @@ export class GhClient {
     return {
       number: data.number,
       baseRef: data.baseRefName,
+      baseRefOid: data.baseRefOid,
+      headRefOid: data.headRefOid,
       visibility: visData?.visibility ?? 'UNKNOWN',
       nameWithOwner: visData?.nameWithOwner ?? repo,
     };

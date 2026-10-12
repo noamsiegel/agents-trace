@@ -30,7 +30,7 @@
 import { spawnSync } from 'node:child_process';
 import { resolve } from 'node:path';
 import { buildPostingPlan, normalizeRepoVisibility } from './src/core/posting-plan.ts';
-import { loadRepoSessions, selectHandoffSession, selectSessionsForRange, safeReadJsonl, isPromptRow, extractPromptText, type SessionSource, type SessionMeta, type CommitRange } from './src/core/session.ts';
+import { loadRepoSessions, loadSessionsForRoots, selectHandoffSession, selectSessionsForRange, safeReadJsonl, isPromptRow, extractPromptText, type SessionSource, type SessionMeta, type SessionWindow, type CommitRange } from './src/core/session.ts';
 import { collectMarkdown, loadScrubbers, sanitize, type ScrubRule } from './src/core/sanitize.ts';
 import { GhClient, type PrContext } from './src/adapters/gh-client.ts';
 import { GitleaksRunner } from './src/adapters/gitleaks.ts';
@@ -209,18 +209,9 @@ function resolveAllRoots(repoRoot: string): string[] {
   return [...roots];
 }
 
-// Load sessions across all worktree roots, deduplicating by session file path.
-function loadAllRootSessions(roots: string[], source: SessionSource): SessionMeta[] {
-  const seen = new Set<string>();
-  const out: SessionMeta[] = [];
-  for (const r of roots) {
-    for (const s of loadRepoSessions(r, source)) {
-      if (seen.has(s.path)) continue;
-      seen.add(s.path);
-      out.push(s);
-    }
-  }
-  return out;
+// Load sessions across all worktree roots in one pass, deduplicated by session file path.
+function loadAllRootSessions(roots: string[], source: SessionSource, window: SessionWindow): SessionMeta[] {
+  return loadSessionsForRoots(roots, source, undefined, window);
 }
 
 async function detectPr(args: Args, repoRoot: string, client = new GhClient()): Promise<PrContext> {
@@ -232,10 +223,9 @@ async function detectPr(args: Args, repoRoot: string, client = new GhClient()): 
   }
 }
 
-function getCommitTimestampsForRange(base: string, repoRoot: string): { min: number; max: number; count: number } {
-  // Commits in HEAD that are not in base.
-  const r = git(['log', '--format=%cI', `${base}..HEAD`], repoRoot);
-  if (r.status !== 0) die(`git log ${base}..HEAD failed: ${r.stderr.trim()}`);
+function getCommitTimestampsForRange(range: string, repoRoot: string): { min: number; max: number; count: number } {
+  const r = git(['log', '--format=%cI', range], repoRoot);
+  if (r.status !== 0) die(`git log ${range} failed: ${r.stderr.trim()}`);
   const ts = r.stdout.split('\n').filter(Boolean).map((s) => Date.parse(s));
   if (ts.length === 0) {
     return { min: Date.now() - 24 * 60 * 60 * 1000, max: Date.now(), count: 0 };
@@ -243,11 +233,34 @@ function getCommitTimestampsForRange(base: string, repoRoot: string): { min: num
   return { min: Math.min(...ts), max: Math.max(...ts), count: ts.length };
 }
 
-function getDiffFilesForRange(base: string, repoRoot: string): Set<string> {
-  // Files changed by HEAD vs base.
-  const r = git(['diff', '--name-only', `${base}..HEAD`], repoRoot);
+function getDiffFilesForRange(range: string, repoRoot: string): Set<string> {
+  const r = git(['diff', '--name-only', range], repoRoot);
   if (r.status !== 0) return new Set();
   return new Set(r.stdout.split('\n').filter(Boolean));
+}
+
+/**
+ * The PR's own commits, by the object ids GitHub reports, never the checkout's `HEAD`.
+ *
+ * Using `origin/<base>..HEAD` tied the result to whatever the checkout had checked out. The
+ * hourly sweep passes the canonical checkout, which sat on a stale `main`: every PR resolved
+ * to zero commits, fell back to "the last 24 hours", and either matched nothing or matched
+ * unrelated sessions. Missing objects are fetched by the PR's pull ref, which also covers
+ * branches that only exist on a fork.
+ *
+ * `diff` is three-dot so the file scope is what the PR changes, not what the base gained since.
+ */
+function prRange(pr: PrContext, repoRoot: string): { log: string; diff: string; label: string } {
+  const have = (oid: string) => git(['cat-file', '-e', `${oid}^{commit}`], repoRoot).status === 0;
+  if (!have(pr.baseRefOid) || !have(pr.headRefOid)) {
+    const f = git(['fetch', '--quiet', '--no-tags', 'origin', pr.baseRef, `refs/pull/${pr.number}/head`], repoRoot);
+    if (f.status !== 0) die(`could not fetch the commits of PR #${pr.number}: ${f.stderr.trim()}`);
+  }
+  return {
+    log: `${pr.baseRefOid}..${pr.headRefOid}`,
+    diff: `${pr.baseRefOid}...${pr.headRefOid}`,
+    label: `${pr.baseRef}@${pr.baseRefOid.slice(0, 7)}..${pr.headRefOid.slice(0, 7)}`,
+  };
 }
 
 // Select overlapping sessions with auto-fallback: when `scope=both` returns zero
@@ -257,16 +270,16 @@ function getDiffFilesForRange(base: string, repoRoot: string): Set<string> {
 function selectWithScopeFallback(
   all: SessionMeta[],
   baseRef: string,
-  repoRoot: string,
+  roots: string[],
   range: CommitRange,
   diffFiles: Set<string>,
   graceMin: number,
   scope: 'time' | 'file' | 'both',
 ): SessionMeta[] {
-  const primary = selectSessionsForRange(all, baseRef, { mode: scope, repoRoot, commitRange: range, diffFiles }, graceMin);
+  const primary = selectSessionsForRange(all, baseRef, { mode: scope, repoRoot: roots, commitRange: range, diffFiles }, graceMin);
   if (primary.length > 0) return primary;
   if (scope !== 'both') return primary;
-  const fallback = selectSessionsForRange(all, baseRef, { mode: 'time', repoRoot, commitRange: range, diffFiles }, graceMin);
+  const fallback = selectSessionsForRange(all, baseRef, { mode: 'time', repoRoot: roots, commitRange: range, diffFiles }, graceMin);
   if (fallback.length > 0) {
     process.stderr.write(`agents-trace: scope=both returned 0 sessions; falling back to scope=time (${fallback.length} match)\n`);
   }
@@ -274,13 +287,28 @@ function selectWithScopeFallback(
 }
 
 
+/**
+ * The transcript window that can still matter for this range.
+ *
+ * The grace window is what `selectSessionsForRange` already allows on either side of the
+ * commit timestamps, so widening by it keeps the prefilters strictly looser than the selector
+ * they feed: anything the selector could accept, the filters keep. A second margin covers
+ * clock skew between the committer and the local filesystem.
+ */
+function sessionWindow(range: CommitRange, graceMin: number): SessionWindow {
+  const margin = graceMin * 60 * 1000 + 60 * 60 * 1000;
+  return { notBefore: range.min - margin, notAfter: range.max + margin };
+}
+
 async function cmdCollect(args: Args, scrubbers: ScrubRule[] = loadScrubbers()) {
   const repoRoot = detectRepoRoot(args.root);
   const pr = await detectPr(args, repoRoot);
-  const range = getCommitTimestampsForRange(`origin/${pr.baseRef}`, repoRoot);
-  const all = loadAllRootSessions(resolveAllRoots(repoRoot), args.source);
-  const diffFiles = args.scope !== 'time' ? getDiffFilesForRange(`origin/${pr.baseRef}`, repoRoot) : new Set<string>();
-  const overlapping = selectWithScopeFallback(all, pr.baseRef, repoRoot, range, diffFiles, args.graceMin, args.scope);
+  const revs = prRange(pr, repoRoot);
+  const range = getCommitTimestampsForRange(revs.log, repoRoot);
+  const roots = resolveAllRoots(repoRoot);
+  const all = loadAllRootSessions(roots, args.source, sessionWindow(range, args.graceMin));
+  const diffFiles = args.scope !== 'time' ? getDiffFilesForRange(revs.diff, repoRoot) : new Set<string>();
+  const overlapping = selectWithScopeFallback(all, pr.baseRef, roots, range, diffFiles, args.graceMin, args.scope);
   const md = collectMarkdown(repoRoot, pr.number, pr.baseRef, overlapping, {
     includeCode: args.includeCode,
     scrubbers,
@@ -292,10 +320,11 @@ function cmdSessionsSince(args: Args) {
   const ref = args.rest[0];
   if (!ref) die('usage: agents-trace sessions-since <ref>', 2);
   const repoRoot = detectRepoRoot(args.root);
-  const range = getCommitTimestampsForRange(ref, repoRoot);
-  const all = loadAllRootSessions(resolveAllRoots(repoRoot), args.source);
-  const diffFiles = args.scope !== 'time' ? getDiffFilesForRange(ref, repoRoot) : new Set<string>();
-  const overlapping = selectWithScopeFallback(all, ref, repoRoot, range, diffFiles, args.graceMin, args.scope);
+  const range = getCommitTimestampsForRange(`${ref}..HEAD`, repoRoot);
+  const roots = resolveAllRoots(repoRoot);
+  const all = loadAllRootSessions(roots, args.source, sessionWindow(range, args.graceMin));
+  const diffFiles = args.scope !== 'time' ? getDiffFilesForRange(`${ref}..HEAD`, repoRoot) : new Set<string>();
+  const overlapping = selectWithScopeFallback(all, ref, roots, range, diffFiles, args.graceMin, args.scope);
   if (overlapping.length === 0) {
     console.log(`No overlapping sessions for commits in ${ref}..HEAD (${range.count} commits).`);
     return;
@@ -317,11 +346,13 @@ export async function cmdGistCreate(
   const repoRoot = detectRepoRoot(args.root);
   const client = deps.ghClient ?? new GhClient();
   const pr = await detectPr(args, repoRoot, client);
-  const range = getCommitTimestampsForRange(`origin/${pr.baseRef}`, repoRoot);
-  const diffFiles = args.scope !== 'time' ? getDiffFilesForRange(`origin/${pr.baseRef}`, repoRoot) : new Set<string>();
-  const overlapping = selectWithScopeFallback(loadAllRootSessions(resolveAllRoots(repoRoot), args.source), pr.baseRef, repoRoot, range, diffFiles, args.graceMin, args.scope);
+  const revs = prRange(pr, repoRoot);
+  const range = getCommitTimestampsForRange(revs.log, repoRoot);
+  const diffFiles = args.scope !== 'time' ? getDiffFilesForRange(revs.diff, repoRoot) : new Set<string>();
+  const roots = resolveAllRoots(repoRoot);
+  const overlapping = selectWithScopeFallback(loadAllRootSessions(roots, args.source, sessionWindow(range, args.graceMin)), pr.baseRef, roots, range, diffFiles, args.graceMin, args.scope);
   if (overlapping.length === 0) {
-    die(`no sessions overlap commits in origin/${pr.baseRef}..HEAD (PR #${pr.number})`);
+    die(`no sessions overlap commits in ${revs.label} (PR #${pr.number})`);
   }
 
   const md = collectMarkdown(repoRoot, pr.number, pr.baseRef, overlapping, {
