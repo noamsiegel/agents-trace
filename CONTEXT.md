@@ -28,8 +28,10 @@ These do not change without a major version bump.
    `MAX_JSONL_ROWS`).
 5. **Session selection must be scoped to the repo and PR**: Claude Code sessions
    are loaded from the cwd-encoded project directory; Codex sessions are kept
-   only when recorded `cwd` equals the repo root; default PR selection requires
-   both commit-time overlap and normalized file overlap. See
+   only when recorded `cwd` is inside the repo or one of its worktrees. Default
+   PR selection tries commit-time and file overlap together, then falls back to
+   time overlap with a warning. Explicit `--scope file` never falls back. PR
+   ranges use GitHub's base and head object IDs. See
    `src/core/session.ts` (`encodeCwd`, `loadRepoSessions`,
    `inspectCodexSession`, `selectSessionsForRange`) and `src/core/scope.ts`.
 6. **PR marker writes are idempotent**: re-attach must update the existing

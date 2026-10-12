@@ -17,6 +17,7 @@ import { loadCodexSessions } from '../src/core/codex.ts';
 import { loadOmpSessions } from '../src/core/omp.ts';
 import { normalizeToRepoRelative, intersectsScope } from '../src/core/scope.ts';
 import { sanitize, type ScrubRule } from '../src/core/sanitize.ts';
+import pkg from '../package.json';
 
 const CLI = new URL('../cli.ts', import.meta.url).pathname;
 
@@ -35,7 +36,7 @@ describe('CLI basics', () => {
   test('--help prints usage', () => {
     const r = runCli('--help');
     expect(r.status).toBe(0);
-    expect(r.stdout).toContain('agents-trace 0.11.0');
+    expect(r.stdout).toContain(`agents-trace ${pkg.version}`);
     expect(r.stdout).toContain('subcommands:');
   });
 

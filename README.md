@@ -102,20 +102,24 @@ gh auth refresh -h github.com -s gist,repo
 ## Usage
 
 ```bash
-agents-trace collect [--pr N] [--source auto|claude|codex]
-agents-trace sessions-since <ref> [--source auto|claude|codex]
-agents-trace gist-create [--pr N] [--source auto|claude|codex]
-agents-trace pr-attach [--pr N] [--source auto|claude|codex]
-agents-trace handoff [--session ID] [--source auto|claude|codex]
+agents-trace collect [--pr N] [--source auto|claude|codex|omp]
+agents-trace sessions-since <ref> [--source auto|claude|codex|omp]
+agents-trace gist-create [--pr N] [--source auto|claude|codex|omp]
+agents-trace pr-attach [--pr N] [--source auto|claude|codex|omp]
+agents-trace handoff [--session ID] [--source auto|claude|codex|omp]
 agents-trace scrub-rules
 ```
 
-Common flags: `--source auto|claude|codex`, `--dry-run`, `--no-attach`,
+Common flags: `--source auto|claude|codex|omp`, `--dry-run`, `--no-attach`,
 `--force`, `--public-ok`, `--include-code`, `--grace-min N`, `--base <ref>`.
 
-`--source auto` is default. It tries Claude Code sessions for the current repo
-first, then Codex sessions. Codex sessions are global, so `agents-trace` scans the
-session tree and keeps only files whose recorded `cwd` equals the repo root.
+`--source auto` is default and loads matching Claude Code, Codex, and OMP
+sessions together. Codex and OMP session trees are scanned once per command,
+keeping sessions whose recorded `cwd` is inside the repo or one of its worktrees.
+Transcript age, start time, and cwd are checked before reading whole files.
+PR commands use the PR's base and head commits, independently of the checkout's
+current branch. `--scope file` requires file overlap without falling back to time
+overlap, which is appropriate for unattended attachment.
 
 ## Configuration
 

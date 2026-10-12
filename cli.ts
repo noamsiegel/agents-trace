@@ -35,7 +35,7 @@ import { collectMarkdown, loadScrubbers, sanitize, type ScrubRule } from './src/
 import { GhClient, type PrContext } from './src/adapters/gh-client.ts';
 import { GitleaksRunner } from './src/adapters/gitleaks.ts';
 
-const VERSION = '0.11.0';
+const VERSION = '0.12.0';
 
 export interface Args {
   pr?: string;
@@ -142,7 +142,7 @@ usage:
   agents-trace <subcommand> [flags]
 
 subcommands:
-  collect [--pr N] [--base REF] [--source auto|claude|codex]
+  collect [--pr N] [--base REF] [--source auto|claude|codex|omp]
                           Print cleaned markdown.
   sessions-since <ref>    List overlapping sessions for commits since <ref>.
   gist-create [--pr N] [--public] [--no-attach]
