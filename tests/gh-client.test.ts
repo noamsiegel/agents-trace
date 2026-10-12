@@ -22,14 +22,14 @@ const fail = (stderr = 'failed'): CommandResult => ({ status: 1, stdout: '', std
 describe('GhClient', () => {
   test('readPrContext parses PR metadata and repo visibility', async () => {
     const runner = new FakeRunner([
-      ok(JSON.stringify({ number: 42, baseRefName: 'main', headRepository: { nameWithOwner: 'owner/repo' } })),
+      ok(JSON.stringify({ number: 42, baseRefName: 'main', baseRefOid: 'b'.repeat(40), headRefOid: 'h'.repeat(40), headRepository: { nameWithOwner: 'owner/repo' } })),
       ok(JSON.stringify({ visibility: 'PRIVATE', nameWithOwner: 'owner/repo' })),
     ]);
 
     const ctx = await new GhClient(runner).readPrContext('/repo', '42');
 
-    expect(ctx).toEqual({ number: 42, baseRef: 'main', visibility: 'PRIVATE', nameWithOwner: 'owner/repo' });
-    expect(runner.calls[0]).toMatchObject({ cmd: 'gh', args: ['pr', 'view', '42', '--json', 'number,baseRefName,headRepository'], cwd: '/repo' });
+    expect(ctx).toEqual({ number: 42, baseRef: 'main', baseRefOid: 'b'.repeat(40), headRefOid: 'h'.repeat(40), visibility: 'PRIVATE', nameWithOwner: 'owner/repo' });
+    expect(runner.calls[0]).toMatchObject({ cmd: 'gh', args: ['pr', 'view', '42', '--json', 'number,baseRefName,baseRefOid,headRefOid,headRepository'], cwd: '/repo' });
     expect(runner.calls[1]).toMatchObject({ cmd: 'gh', args: ['repo', 'view', 'owner/repo', '--json', 'visibility,nameWithOwner'], cwd: '/repo' });
   });
 

@@ -12,7 +12,7 @@ import { spawnSync } from 'node:child_process';
 import { mkdirSync, mkdtempSync, rmSync, utimesSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { encodeCwd, loadRepoSessions, type SessionMeta } from '../src/core/session.ts';
+import { encodeCwd, readHeader, loadRepoSessions, loadSessionsForRoots, selectSessionsForRange, type SessionMeta } from '../src/core/session.ts';
 import { loadCodexSessions } from '../src/core/codex.ts';
 import { loadOmpSessions } from '../src/core/omp.ts';
 import { normalizeToRepoRelative, intersectsScope } from '../src/core/scope.ts';
@@ -306,6 +306,106 @@ describe('OMP session adapter', () => {
     expect(sessions[0]!.promptCount).toBe(2);
   });
 
+  test('one walk of the OMP tree serves every worktree root', () => {
+    // The sweep passes a checkout with 35 worktrees. Walking the global tree once per root read
+    // the same ~22 GB of transcripts 35 times for one PR. Each root's session must come back,
+    // exactly once, and the other repo's must not.
+    const worktree = join(fakeHome, 'omp-worktree');
+    mkdirSync(worktree, { recursive: true });
+    const dir = join(fakeHome, '.omp', 'agent', 'sessions', '-omp-worktree');
+    mkdirSync(dir, { recursive: true });
+    const now = Date.now();
+    writeFileSync(join(dir, 'wt.jsonl'), [
+      { type: 'session', id: 'wt', timestamp: new Date(now - 2000).toISOString(), cwd: worktree },
+      { type: 'message', id: 'p', timestamp: new Date(now - 1000).toISOString(), message: { role: 'user', attribution: 'user', content: [{ type: 'text', text: 'worktree prompt' }] } },
+    ].map((r) => JSON.stringify(r)).join('\n'));
+
+    const sessions = loadSessionsForRoots([repo, worktree, repo], 'omp');
+    expect(sessions.map((s) => s.path.split('/').pop()).sort()).toEqual(['2026-05-24T00-00-00-000Z_sess-1.jsonl', 'wt.jsonl']);
+  });
+
+  test('a transcript whose first row names no cwd is still read in full', () => {
+    // The header check is a prefilter: "unknown" must mean "read it", never "skip it", or a
+    // transcript with an unexpected first row silently drops out of the record.
+    const dir = join(fakeHome, '.omp', 'agent', 'sessions', '-omp-repo');
+    const now = Date.now();
+    const filler = Array.from({ length: 20 }, (_, i) => ({ type: 'model_change', id: `m${i}`, timestamp: new Date(now - 3000).toISOString(), model: 'x' }));
+    writeFileSync(join(dir, 'late-header.jsonl'), [
+      ...filler,
+      { type: 'session', id: 'late', timestamp: new Date(now - 2000).toISOString(), cwd: repo },
+      { type: 'message', id: 'p', timestamp: new Date(now - 1000).toISOString(), message: { role: 'user', attribution: 'user', content: [{ type: 'text', text: 'late header prompt' }] } },
+    ].map((r) => JSON.stringify(r)).join('\n'));
+
+    const names = loadRepoSessions(repo, 'omp').map((s) => s.path.split('/').pop());
+    expect(names).toContain('late-header.jsonl');
+  });
+
+  test('readHeader finds the recorded cwd near the start, past a leading title row', () => {
+    const dir = join(fakeHome, 'headers');
+    mkdirSync(dir, { recursive: true });
+    const write = (name: string, rows: unknown[]) => {
+      writeFileSync(join(dir, name), rows.map((r) => JSON.stringify(r)).join('\n'));
+      return join(dir, name);
+    };
+    expect(readHeader(write('omp.jsonl', [{ type: 'session', cwd: '/a' }, { type: 'x' }])).cwd).toBe('/a');
+    expect(readHeader(write('codex.jsonl', [{ type: 'session_meta', payload: { cwd: '/b' } }])).cwd).toBe('/b');
+    // OMP now writes a `title` row before its header; stopping at row one disabled the prefilter.
+    expect(readHeader(write('titled.jsonl', [{ type: 'title', title: 't' }, { type: 'session', cwd: '/c' }])).cwd).toBe('/c');
+    expect(readHeader(write('claude.jsonl', [{ type: 'summary' }, { type: 'user', cwd: '/d' }])).cwd).toBe('/d');
+    expect(readHeader(write('none.jsonl', Array.from({ length: 20 }, () => ({ type: 'model_change' })))).cwd).toBeNull();
+  });
+
+  test('a session that started after the window is skipped, and loads without the bound', () => {
+    // mtime only bounds a file from below: for a month-old PR it keeps every session since,
+    // and each one is read in full (measured: 312 MB peak for one PR). A session whose first
+    // row is after the PR's last commit cannot overlap it.
+    const startedAt = readHeader(join(fakeHome, '.omp', 'agent', 'sessions', '-omp-repo', '2026-05-24T00-00-00-000Z_sess-1.jsonl')).startTs;
+    const before = startedAt - 60 * 60 * 1000;
+    expect(loadSessionsForRoots([repo], 'omp', undefined, { notBefore: 0, notAfter: before })).toHaveLength(0);
+    expect(loadSessionsForRoots([repo], 'omp', undefined, { notBefore: 0, notAfter: Number.POSITIVE_INFINITY })).toHaveLength(1);
+    // The boundary is inclusive of the start itself.
+    expect(loadSessionsForRoots([repo], 'omp', undefined, { notBefore: 0, notAfter: startedAt })).toHaveLength(1);
+  });
+
+  test('a session started in a subdirectory of the repo belongs to it', () => {
+    // Most sessions on the machine this was found on ran in `monorepo/apps/hoa`. Requiring the
+    // recorded cwd to EQUAL a root dropped every one of them, and no PR ever got a transcript.
+    const dir = join(fakeHome, '.omp', 'agent', 'sessions', '-omp-repo-apps-web');
+    mkdirSync(dir, { recursive: true });
+    const now = Date.now();
+    writeFileSync(join(dir, 'sub.jsonl'), [
+      { type: 'title', title: 'sub' },
+      { type: 'session', id: 'sub', timestamp: new Date(now - 2000).toISOString(), cwd: join(repo, 'apps', 'web') },
+      { type: 'message', id: 'p', timestamp: new Date(now - 1000).toISOString(), message: { role: 'user', attribution: 'user', content: [{ type: 'text', text: 'subdir prompt' }] } },
+    ].map((r) => JSON.stringify(r)).join('\n'));
+
+    const names = loadRepoSessions(repo, 'omp').map((s) => s.path.split('/').pop());
+    expect(names).toContain('sub.jsonl');
+    // A sibling whose path merely starts with the same characters is not inside the repo.
+    expect(names).not.toContain('2026-05-24T00-00-01-000Z_sess-2.jsonl');
+  });
+
+  test('Claude directories for subdirectories are verified by recorded cwd, not by name', () => {
+    // encodeCwd turns `/` and `.` into `-`, so `omp-repo-old` (another repo) and `omp-repo/old`
+    // (inside this one) encode alike. Only the cwd a file records can tell them apart, and a
+    // file that records none is left out: another repo's transcript in a gist is a disclosure.
+    const claudeRoot = join(fakeHome, '.claude', 'projects');
+    const now = Date.now();
+    const user = (cwd: string | undefined, text: string) => ({ type: 'user', timestamp: new Date(now - 1000).toISOString(), ...(cwd ? { cwd } : {}), message: { role: 'user', content: text } });
+    const put = (dirName: string, file: string, rows: unknown[]) => {
+      mkdirSync(join(claudeRoot, dirName), { recursive: true });
+      writeFileSync(join(claudeRoot, dirName, file), rows.map((r) => JSON.stringify(r)).join('\n'));
+    };
+    put(encodeCwd(join(repo, 'old')), 'inside.jsonl', [user(join(repo, 'old'), 'inside')]);
+    put(encodeCwd(repo + '-old'), 'sibling.jsonl', [user(repo + '-old', 'sibling repo')]);
+    put(encodeCwd(join(repo, 'nocwd')), 'unverified.jsonl', [user(undefined, 'no cwd recorded')]);
+
+    const names = loadRepoSessions(repo, 'claude', claudeRoot).map((s) => s.path.split('/').pop());
+    expect(names).toContain('inside.jsonl');
+    expect(names).not.toContain('sibling.jsonl');
+    expect(names).not.toContain('unverified.jsonl');
+  });
+
   test('auto does not let a Claude transcript hide OMP sessions', () => {
     // The bug that made this tool produce nothing on a machine with both histories: `auto`
     // returned the FIRST source that had any sessions, so four stale Claude transcripts for a
@@ -576,5 +676,42 @@ describe('Core session and scope helpers', () => {
 
     expect(intersectsScope(session, normalizeToRepoRelative(['packages/b/src/index.ts'], '/repo'), '/repo')).toBe(false);
     expect(intersectsScope(session, normalizeToRepoRelative(['packages/a/src/index.ts'], '/repo'), '/repo')).toBe(true);
+  });
+});
+
+describe('file scope across worktrees', () => {
+  test('a session in a worktree matches the diff through that worktree root', () => {
+    // Worktree sessions record paths under the worktree. Relative to the canonical checkout they
+    // read `.claude/worktrees/<name>/src/a.ts` and never matched `src/a.ts`, so `both` found
+    // nothing and fell back to time-only, which attached unrelated sessions.
+    const canonical = '/repo';
+    const worktree = '/repo/.claude/worktrees/feat';
+    const session: SessionMeta = { path: '/s.jsonl', firstTs: 1000, lastTs: 2000, promptCount: 1, filesTouched: new Set([`${worktree}/src/a.ts`]) };
+    const scope = (repoRoot: string | string[]) => ({ mode: 'file' as const, repoRoot, commitRange: { min: 1000, max: 2000 }, diffFiles: ['src/a.ts'] });
+    expect(selectSessionsForRange([session], 'main', scope([canonical, worktree]), 30)).toHaveLength(1);
+    // A top-level file has no tail to match by, so only the worktree root ties it to the diff.
+    const top: SessionMeta = { ...session, filesTouched: new Set([`${worktree}/package.json`]) };
+    const topScope = (repoRoot: string | string[]) => ({ ...scope(repoRoot), diffFiles: ['package.json'] });
+    expect(selectSessionsForRange([top], 'main', topScope([canonical, worktree]), 30)).toHaveLength(1);
+    expect(selectSessionsForRange([top], 'main', topScope(canonical), 30)).toHaveLength(0);
+  });
+});
+
+describe('file scope for removed worktrees', () => {
+  const scope = { mode: 'file' as const, repoRoot: '/repo', commitRange: { min: 1000, max: 2000 } };
+  const touching = (...paths: string[]): SessionMeta => ({ path: '/s.jsonl', firstTs: 1000, lastTs: 2000, promptCount: 1, filesTouched: new Set(paths) });
+
+  test('a path under a since-deleted worktree matches by its repo-relative tail', () => {
+    // Measured on the machine this was found on: the session behind a PR edited files under
+    // `.worktrees/monorepo/HOA-6310-.../apps/hoa/...`, a worktree reaped after merge. No root
+    // contains that path, so only the tail can tie it to the diff.
+    const s = touching('/home/u/.worktrees/monorepo/HOA-1-x/apps/hoa/etl/a.py');
+    expect(selectSessionsForRange([s], 'main', { ...scope, diffFiles: ['apps/hoa/etl/a.py'] }, 30)).toHaveLength(1);
+    expect(selectSessionsForRange([s], 'main', { ...scope, diffFiles: ['apps/hoa/etl/b.py'] }, 30)).toHaveLength(0);
+  });
+
+  test('a bare top-level name does not match by tail', () => {
+    const s = touching('/home/u/other-project/README.md');
+    expect(selectSessionsForRange([s], 'main', { ...scope, diffFiles: ['README.md'] }, 30)).toHaveLength(0);
   });
 });

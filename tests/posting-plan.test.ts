@@ -103,7 +103,7 @@ describe('cmdGistCreate posting-plan integration', () => {
     let upserts = 0;
     const ghClient = {
       async readPrContext() {
-        return { number: 7, baseRef: 'main', visibility: 'PUBLIC', nameWithOwner: 'owner/repo' };
+        return { number: 7, baseRef: 'main', baseRefOid: rev(repo, 'origin/main'), headRefOid: rev(repo, 'feature'), visibility: 'PUBLIC', nameWithOwner: 'owner/repo' };
       },
       async readPrBody() {
         return '';
@@ -149,7 +149,7 @@ describe('cmdGistCreate posting-plan integration', () => {
       await expect(cmdGistCreate(baseArgs(repo), {
         ghClient: {
           async readPrContext() {
-            return { number: 7, baseRef: 'main', visibility: 'PRIVATE', nameWithOwner: 'owner/repo' };
+            return { number: 7, baseRef: 'main', baseRefOid: rev(repo, 'origin/main'), headRefOid: rev(repo, 'feature'), visibility: 'PRIVATE', nameWithOwner: 'owner/repo' };
           },
           async readPrBody() { return ''; },
           async findAttachedAgentsTraceGist() { return null; },
@@ -171,6 +171,52 @@ describe('cmdGistCreate posting-plan integration', () => {
   });
 });
 
+describe('cmdGistCreate commit range', () => {
+  let fakeHome = '';
+  let actualSessionDir = '';
+  const originalHome = process.env.HOME;
+
+  afterEach(() => {
+    process.env.HOME = originalHome;
+    if (fakeHome) rmSync(fakeHome, { recursive: true, force: true });
+    if (actualSessionDir) rmSync(actualSessionDir, { recursive: true, force: true });
+  });
+
+  test("reads the PR's commits by object id, not the checkout's HEAD", async () => {
+    // The hourly sweep runs against the canonical checkout, which sits on the base branch. With
+    // `origin/<base>..HEAD` every PR resolved to zero commits and fell back to "the last 24
+    // hours", so a PR whose work happened ten days ago matched nothing. Here the checkout is on
+    // main and the PR's only commit and session are ten days old: only the real range finds it.
+    ({ home: fakeHome, actualSessionDir } = makeFixtureHome({ ageMs: 10 * 24 * 60 * 60 * 1000, checkout: 'main' }));
+    process.env.HOME = fakeHome;
+    const { cmdGistCreate } = await import(`../cli.ts?range=${Date.now()}`);
+    const repo = join(fakeHome, 'repo');
+    const originalExit = process.exit;
+    process.exit = ((code?: string | number | null) => { throw new Error(`exit:${code}`); }) as typeof process.exit;
+    const originalWrite = process.stdout.write;
+    let out = '';
+    process.stdout.write = ((chunk: string) => { out += chunk; return true; }) as typeof process.stdout.write;
+    try {
+      await cmdGistCreate(baseArgs(repo, { dryRun: true, scope: 'time' }), {
+        ghClient: {
+          async readPrContext() {
+            return { number: 7, baseRef: 'main', baseRefOid: rev(repo, 'origin/main'), headRefOid: rev(repo, 'feature'), visibility: 'PRIVATE', nameWithOwner: 'owner/repo' };
+          },
+          async readPrBody() { return ''; },
+          async findAttachedAgentsTraceGist() { return null; },
+          async upsertAgentsTraceGist() { throw new Error('dry run must not upsert'); },
+          async writeAgentsTraceLink() {},
+        },
+        gitleaksRunner: { async run() { return [] as GitleaksFinding[]; } },
+      });
+    } finally {
+      process.exit = originalExit;
+      process.stdout.write = originalWrite;
+    }
+    expect(out).toContain('change a.txt');
+  });
+});
+
 function baseArgs(repo: string, overrides: Partial<Args> = {}): Args {
   return {
     root: repo,
@@ -187,11 +233,16 @@ function baseArgs(repo: string, overrides: Partial<Args> = {}): Args {
   };
 }
 
-function makeFixtureHome(): { home: string; actualSessionDir: string } {
+function rev(repo: string, ref: string): string {
+  return spawnSync('git', ['-C', repo, 'rev-parse', ref], { encoding: 'utf8' }).stdout.trim();
+}
+
+function makeFixtureHome({ ageMs = 0, checkout = 'feature' }: { ageMs?: number; checkout?: string } = {}): { home: string; actualSessionDir: string } {
   const home = mkdtempSync(join(tmpdir(), 'pp-plan-'));
   const repo = join(home, 'repo');
   mkdirSync(repo);
-  const git = (...args: string[]) => spawnSync('git', ['-C', repo, ...args]);
+  const when = new Date(Date.now() - ageMs).toISOString();
+  const git = (...args: string[]) => spawnSync('git', ['-C', repo, ...args], { env: { ...process.env, GIT_AUTHOR_DATE: when, GIT_COMMITTER_DATE: when } });
   git('init', '-q', '-b', 'main');
   git('config', 'user.email', 't@example.test');
   git('config', 'user.name', 'T');
@@ -203,13 +254,14 @@ function makeFixtureHome(): { home: string; actualSessionDir: string } {
   writeFileSync(join(repo, 'a.txt'), 'aa');
   git('add', '.');
   git('commit', '-q', '-m', 'change');
+  git('checkout', '-q', checkout);
 
   const encoded = encodeCwd(repo);
   const sessionDir = join(home, '.claude', 'projects', encoded);
   const actualSessionDir = join(homedir(), '.claude', 'projects', encoded);
   mkdirSync(sessionDir, { recursive: true });
   mkdirSync(actualSessionDir, { recursive: true });
-  const now = Date.now();
+  const now = Date.now() - ageMs;
   const rows = [
     { type: 'user', timestamp: new Date(now - 1000).toISOString(), message: { content: [{ type: 'text', text: 'change a.txt' }] } },
     { type: 'assistant', timestamp: new Date(now - 500).toISOString(), message: { content: [{ type: 'tool_use', name: 'Edit', input: { file_path: join(repo, 'a.txt') } }] } },

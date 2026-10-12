@@ -1,7 +1,7 @@
 import { closeSync, existsSync, fstatSync, lstatSync, openSync, readSync, readdirSync, realpathSync } from 'node:fs';
-import { join, resolve } from 'node:path';
+import { dirname, join, resolve } from 'node:path';
 import { homedir, userInfo } from 'node:os';
-import { normalizeToRepoRelative, intersectsScope } from './scope.ts';
+import { normalizeToRepoRelative, intersectsScope, touchesScopeBySuffix } from './scope.ts';
 
 const MAX_JSONL_BYTES = 20 * 1024 * 1024;
 const MAX_JSONL_ROWS = 50000;
@@ -22,9 +22,18 @@ export interface CommitRange {
   count?: number;
 }
 
+/** Bounds a transcript must overlap to matter. `{ notBefore: 0, notAfter: Infinity }` disables both. */
+export interface SessionWindow {
+  notBefore: number;
+  notAfter: number;
+}
+
+const NO_WINDOW: SessionWindow = { notBefore: 0, notAfter: Number.POSITIVE_INFINITY };
+
 export interface RangeSelectionScope {
   mode: 'time' | 'file' | 'both';
-  repoRoot: string;
+  /** The canonical checkout first, then its worktrees. Diff paths are relative to any of them. */
+  repoRoot: string | readonly string[];
   commitRange: CommitRange;
   diffFiles: string[] | Set<string>;
 }
@@ -64,61 +73,120 @@ export function encodeCwd(p: string): string {
   return p.replaceAll('/', '-').replaceAll('.', '-');
 }
 
-// Compare two filesystem paths through realpath so symlink-mediated mismatches
-// (e.g. macOS /var/folders/\u2026 vs /private/var/folders/\u2026, or worktrees vs canonical)
-// don't cause false negatives when matching session.cwd to repoRoot.
-export function pathsEquivalent(a: string, b: string): boolean {
-  if (resolve(a) === resolve(b)) return true;
-  let ra: string, rb: string;
-  try { ra = realpathSync(a); } catch { ra = resolve(a); }
-  try { rb = realpathSync(b); } catch { rb = resolve(b); }
-  return ra === rb;
+/**
+ * Membership test for "was this cwd inside the repo": a root or any directory under one.
+ *
+ * Inside, not only equal: agents are routinely started from a subdirectory (on this machine
+ * most sessions ran in `monorepo/apps/hoa`), and requiring equality silently dropped all of
+ * them. Every root is the same repository (the canonical checkout and its worktrees), so a
+ * worktree nested under the canonical checkout attributes to the same repo either way.
+ *
+ * Paths compare by resolved form and by realpath, so symlink-mediated spellings still match
+ * (macOS /var/folders vs /private/var/folders). Each root's forms are computed once.
+ */
+function rootMatcher(roots: string | readonly string[]): (cwd: string) => boolean {
+  const keys = new Set<string>();
+  for (const r of typeof roots === 'string' ? [roots] : roots) {
+    keys.add(resolve(r));
+    try { keys.add(realpathSync(r)); } catch { /* resolved form already added */ }
+  }
+  const within = (p: string) => {
+    for (let cur = p; ; cur = dirname(cur)) {
+      if (keys.has(cur)) return true;
+      if (dirname(cur) === cur) return false;
+    }
+  };
+  return (cwd) => {
+    if (within(resolve(cwd))) return true;
+    try { return within(realpathSync(cwd)); } catch { return false; }
+  };
 }
 
 export type SessionSource = 'claude' | 'codex' | 'omp' | 'auto';
 
 export function loadRepoSessions(repoRoot: string, source: SessionSource = 'auto', claudeRoot = join(process.env.HOME ?? homedir(), '.claude', 'projects'), notBefore = 0): SessionMeta[] {
-  if (source === 'codex') return loadCodexSessions(repoRoot, notBefore);
-  if (source === 'omp') return loadOmpSessions(repoRoot, notBefore);
-  if (source === 'claude') return loadClaudeSessions(repoRoot, claudeRoot, notBefore);
+  return loadSessionsForRoots([repoRoot], source, claudeRoot, { ...NO_WINDOW, notBefore });
+}
 
-  // `auto` used to return the first source that had ANY sessions, which let stale history from
-  // one tool hide the current work of another. On this machine four old Claude transcripts for
-  // a repo shadowed 409 OMP sessions: none of the four overlapped the commit range, so every
-  // run reported "no overlapping sessions" while the sessions that did overlap were never
-  // loaded. That is the reason no PR here had ever received a transcript.
-  //
-  // Which sessions belong to a commit range is decided by the overlap test downstream, not by
-  // which tool happened to write something first, so `auto` now offers all of them. Paths are
-  // distinct per source, and `loadAllRootSessions` dedupes by path across roots.
-  return [
-    ...loadClaudeSessions(repoRoot, claudeRoot, notBefore),
-    ...loadCodexSessions(repoRoot, notBefore),
-    ...loadOmpSessions(repoRoot, notBefore),
-  ];
+/**
+ * Sessions recorded in any of `roots`: a canonical checkout and its worktrees.
+ *
+ * Claude Code keeps one directory per cwd. Codex and OMP each keep one global tree, which is
+ * walked ONCE with every file matched against all roots. Walking it once per root read the
+ * same ~22 GB of transcripts 35 times for a single PR on a machine with 35 worktrees, which is
+ * what made the hourly sweep a multi-hundred-MB, multi-minute process.
+ *
+ * `auto` offers every source. It used to return the first source that had ANY sessions, which
+ * let stale history from one tool hide the current work of another: four old Claude
+ * transcripts for a repo shadowed 409 OMP sessions, none of the four overlapped the commit
+ * range, and every run reported "no overlapping sessions". Which sessions belong to a range is
+ * decided by the overlap test downstream, not by which tool wrote something first.
+ */
+export function loadSessionsForRoots(roots: readonly string[], source: SessionSource = 'auto', claudeRoot = join(process.env.HOME ?? homedir(), '.claude', 'projects'), window: SessionWindow = NO_WINDOW): SessionMeta[] {
+  const home = process.env.HOME ?? homedir();
+  const out = new Map<string, SessionMeta>();
+  const add = (sessions: SessionMeta[]) => {
+    for (const s of sessions) if (!out.has(s.path)) out.set(s.path, s);
+  };
+  if (source === 'claude' || source === 'auto') {
+    add(loadClaudeSessionsForRoots(roots, claudeRoot, window));
+  }
+  if (source === 'codex' || source === 'auto') {
+    add(loadTreeSessions(join(home, '.codex', 'sessions'), roots, window, inspectCodexSession));
+  }
+  if (source === 'omp' || source === 'auto') {
+    add(loadTreeSessions(join(home, '.omp', 'agent', 'sessions'), roots, window, inspectOmpSession));
+  }
+  return [...out.values()];
 }
 
 export function loadClaudeSessions(repoRoot: string, claudeRoot: string, notBefore = 0): SessionMeta[] {
-  const encoded = encodeCwd(repoRoot);
-  const dir = join(claudeRoot, encoded);
-  if (!existsSync(dir)) return [];
+  return loadClaudeSessionsForRoots([repoRoot], claudeRoot, { ...NO_WINDOW, notBefore });
+}
 
-  let dirStat;
+/**
+ * Claude Code keeps one directory per cwd, named by `encodeCwd`. A root's own directory is
+ * trusted, as it always was. Directories for subdirectories of a root are found by name prefix,
+ * but the encoding is lossy (`/` and `.` both become `-`, so `monorepo-old` shares a prefix with
+ * `monorepo/`), so each file there is kept only when the cwd it records is inside a root. A
+ * file that records none is skipped: including another repository's transcript in a gist is
+ * a disclosure, and missing one is not.
+ */
+function loadClaudeSessionsForRoots(roots: readonly string[], claudeRoot: string, window: SessionWindow): SessionMeta[] {
+  if (!existsSync(claudeRoot)) return [];
+  const uid = userInfo().uid;
+  const exact = new Set(roots.map(encodeCwd));
+  const prefixes = [...exact].map((e) => e + '-');
+  const matches = rootMatcher(roots);
+  const out: SessionMeta[] = [];
+  let names: string[];
   try {
-    dirStat = lstatSync(dir);
+    names = readdirSync(claudeRoot);
   } catch {
     return [];
   }
-  if (dirStat.isSymbolicLink() || !dirStat.isDirectory()) return [];
-  if (dirStat.uid !== userInfo().uid) return [];
-
-  const files = readdirSync(dir).filter((f) => f.endsWith('.jsonl'));
-  const out: SessionMeta[] = [];
-  for (const f of files) {
-    const fp = join(dir, f);
-    if (isOlderThan(fp, notBefore)) continue;
-    const meta = inspectSession(fp);
-    if (meta && meta.promptCount > 0) out.push(meta);
+  for (const name of names) {
+    const trusted = exact.has(name);
+    if (!trusted && !prefixes.some((p) => name.startsWith(p))) continue;
+    const dir = join(claudeRoot, name);
+    let dirStat;
+    try {
+      dirStat = lstatSync(dir);
+    } catch {
+      continue;
+    }
+    if (dirStat.isSymbolicLink() || !dirStat.isDirectory() || dirStat.uid !== uid) continue;
+    for (const f of readdirSync(dir)) {
+      if (!f.endsWith('.jsonl')) continue;
+      const fp = join(dir, f);
+      if (skipUnread(fp, window, null)) continue;
+      if (!trusted) {
+        const cwd = readHeader(fp).cwd;
+        if (cwd === null || !matches(cwd)) continue;
+      }
+      const meta = inspectSession(fp);
+      if (meta && meta.promptCount > 0) out.push(meta);
+    }
   }
   return out;
 }
@@ -158,7 +226,7 @@ export function inspectSession(path: string): SessionMeta | null {
   return finiteSession(path, firstTs, lastTs, promptCount, filesTouched);
 }
 
-export function inspectCodexSession(path: string, repoRoot: string): SessionMeta | null {
+export function inspectCodexSession(path: string, repoRoot: string | readonly string[]): SessionMeta | null {
   const content = safeReadJsonl(path);
   if (content === null) return null;
   let cwd: string | null = null;
@@ -198,11 +266,11 @@ export function inspectCodexSession(path: string, repoRoot: string): SessionMeta
 
   // Codex stores sessions in a global tree rather than a cwd-encoded directory.
   // Scan every session file and keep only transcripts whose recorded cwd is the target repo.
-  if (cwd === null || !pathsEquivalent(cwd, repoRoot)) return null;
+  if (cwd === null || !rootMatcher(repoRoot)(cwd)) return null;
   return finiteSession(path, firstTs, lastTs, promptCount, filesTouched);
 }
 
-export function inspectOmpSession(path: string, repoRoot: string): SessionMeta | null {
+export function inspectOmpSession(path: string, repoRoot: string | readonly string[]): SessionMeta | null {
   // OMP (Oh-My-Pi) session JSONL.
   //
   // Header row: { type: "session", id, timestamp, cwd: "...", title }
@@ -245,7 +313,7 @@ export function inspectOmpSession(path: string, repoRoot: string): SessionMeta |
     extractFilePaths(row, filesTouched);
   }
 
-  if (cwd === null || !pathsEquivalent(cwd, repoRoot)) return null;
+  if (cwd === null || !rootMatcher(repoRoot)(cwd)) return null;
   return finiteSession(path, firstTs, lastTs, promptCount, filesTouched);
 }
 
@@ -281,16 +349,23 @@ export function selectSessionsForRange(
   scope: RangeSelectionScope,
   graceMin: number,
 ): SessionMeta[] {
-  const fileScope = normalizeToRepoRelative([...scope.diffFiles], scope.repoRoot);
+  const roots = typeof scope.repoRoot === 'string' ? [scope.repoRoot] : scope.repoRoot;
+  const fileScope = normalizeToRepoRelative([...scope.diffFiles], roots[0]!);
+  // A session in a worktree records absolute paths under THAT worktree. Relative to the
+  // canonical checkout they read `.claude/worktrees/<name>/apps/...` and never match the diff,
+  // so file overlap is tested against every root, and by repo-relative tail for worktrees that
+  // no longer exist (see touchesScopeBySuffix).
+  const touchesDiff = (session: SessionMeta) =>
+    roots.some((root) => intersectsScope(session, fileScope, root)) || touchesScopeBySuffix(session, fileScope);
   return sessions.filter((session) => {
     const timeMatch = overlapsRange(session, scope.commitRange, graceMin);
     switch (scope.mode) {
       case 'time':
         return timeMatch;
       case 'file':
-        return intersectsScope(session, fileScope, scope.repoRoot);
+        return touchesDiff(session);
       case 'both':
-        return timeMatch && intersectsScope(session, fileScope, scope.repoRoot);
+        return timeMatch && touchesDiff(session);
     }
   });
 }
@@ -300,7 +375,7 @@ export function selectHandoffSession(sessions: SessionMeta[], name?: string): Se
   return [...sessions].sort((a, b) => b.lastTs - a.lastTs)[0];
 }
 
-export function safeReadJsonl(path: string): string | null {
+export function safeReadJsonl(path: string, maxBytes = Number.POSITIVE_INFINITY): string | null {
   let stat;
   try {
     stat = lstatSync(path);
@@ -322,10 +397,11 @@ export function safeReadJsonl(path: string): string | null {
   try {
     const fstat = fstatSync(fd);
     if (fstat.ino !== stat.ino || fstat.dev !== stat.dev) return null;
-    const buf = Buffer.alloc(fstat.size);
+    const size = Math.min(fstat.size, maxBytes);
+    const buf = Buffer.alloc(size);
     let offset = 0;
-    while (offset < fstat.size) {
-      const n = readSync(fd, buf, offset, fstat.size - offset, offset);
+    while (offset < size) {
+      const n = readSync(fd, buf, offset, size - offset, offset);
       if (n <= 0) break;
       offset += n;
     }
@@ -455,41 +531,82 @@ function timestampOf(row: { timestamp?: string }): number {
   return Number.isNaN(t) ? 0 : t;
 }
 
-function loadCodexSessions(repoRoot: string, notBefore = 0): SessionMeta[] {
-  // Dynamic import avoided here: session.ts is the central loader and codex.ts imports its inspectors.
-  const root = join(process.env.HOME ?? homedir(), '.codex', 'sessions');
-  if (!existsSync(root)) return [];
-  const out: SessionMeta[] = [];
-  const stack = [root];
-  while (stack.length > 0) {
-    const dir = stack.pop()!;
-    let stat;
+/** Bytes read to find a transcript's cwd. Codex's session_meta row is ~23 KB; OMP's is ~256 B. */
+const HEADER_BYTES = 64 * 1024;
+
+/** Rows examined for a cwd before giving up. OMP now writes a `title` row before its header. */
+const HEADER_ROWS = 16;
+
+/**
+ * What a transcript records near its start: its cwd (OMP `{type:"session", cwd}`, Codex
+ * `{type:"session_meta", payload:{cwd}}`, Claude Code's per-row `cwd`) and its start time (the
+ * earliest `timestamp` among those rows). Looks at the first complete rows of the first 64 KB.
+ *
+ * A prefilter: `cwd: null` / `startTs: Infinity` mean "unknown, read the whole file", never
+ * "skip". It goes through the same safe read as a full load, just with a byte cap.
+ */
+export function readHeader(path: string): { cwd: string | null; startTs: number } {
+  const unknown = { cwd: null, startTs: Number.POSITIVE_INFINITY };
+  const head = safeReadJsonl(path, HEADER_BYTES);
+  if (head === null) return unknown;
+  const lines = head.split('\n');
+  // The last piece is partial when the read stopped at the byte cap.
+  if (head.length >= HEADER_BYTES) lines.pop();
+  let cwd: string | null = null;
+  let startTs = Number.POSITIVE_INFINITY;
+  for (const line of lines.slice(0, HEADER_ROWS)) {
+    if (!line.trim()) continue;
+    let row: { type?: string; timestamp?: string; cwd?: unknown; payload?: { cwd?: unknown } };
     try {
-      stat = lstatSync(dir);
+      row = JSON.parse(line);
     } catch {
       continue;
     }
-    if (stat.isSymbolicLink() || !stat.isDirectory() || stat.uid !== userInfo().uid) continue;
-    for (const entry of readdirSync(dir)) {
-      const path = join(dir, entry);
-      if (entry.endsWith('.jsonl')) {
-        if (isOlderThan(path, notBefore)) continue;
-        const meta = inspectCodexSession(path, repoRoot);
-        if (meta && meta.promptCount > 0) out.push(meta);
-      } else {
-        stack.push(path);
-      }
-    }
+    const t = timestampOf(row);
+    if (t !== 0 && t < startTs) startTs = t;
+    if (cwd === null && typeof row.cwd === 'string') cwd = row.cwd;
+    if (cwd === null && row.type === 'session_meta' && typeof row.payload?.cwd === 'string') cwd = row.payload.cwd;
   }
-  return out;
+  return { cwd, startTs };
 }
 
-function loadOmpSessions(repoRoot: string, notBefore = 0): SessionMeta[] {
-  // Same dispatch pattern as loadCodexSessions to avoid circular imports with omp.ts.
-  const root = join(process.env.HOME ?? homedir(), '.omp', 'agent', 'sessions');
-  if (!existsSync(root)) return [];
+/**
+ * Can this transcript be skipped without a full read? Two bounds, each sound in the direction
+ * that matters (it may keep a file it did not need, never drop one it did):
+ *
+ * - `isOlderThan`: mtime is the LAST write, an upper bound on every row, so a file last written
+ *   before `notBefore` has no row in the window.
+ * - start time after `notAfter`: rows are appended in order, so the earliest header timestamp
+ *   is the session's start, and a session that began after the PR's last commit (plus grace)
+ *   cannot overlap it. On a long-lived machine the mtime bound alone keeps every session since
+ *   the PR began, which for a month-old PR is nearly all of them.
+ *
+ * With a matcher, a header cwd outside every root also skips; a null matcher means the caller
+ * already trusts the file's location.
+ */
+function skipUnread(path: string, window: SessionWindow, matches: ((cwd: string) => boolean) | null): boolean {
+  if (isOlderThan(path, window.notBefore)) return true;
+  const header = readHeader(path);
+  if (header.startTs > window.notAfter) return true;
+  return matches !== null && header.cwd !== null && !matches(header.cwd);
+}
+
+/**
+ * Walk one global transcript tree (Codex or OMP) once for all roots, skipping by `skipUnread`
+ * before any full read. On this machine nearly every transcript belongs to some other repo or
+ * time, and the header settles that in 64 KB instead of up to 20 MB.
+ */
+function loadTreeSessions(
+  treeRoot: string,
+  roots: readonly string[],
+  window: SessionWindow,
+  inspect: (path: string, roots: readonly string[]) => SessionMeta | null,
+): SessionMeta[] {
+  if (!existsSync(treeRoot)) return [];
+  const matches = rootMatcher(roots);
+  const uid = userInfo().uid;
   const out: SessionMeta[] = [];
-  const stack = [root];
+  const stack = [treeRoot];
   while (stack.length > 0) {
     const dir = stack.pop()!;
     let stat;
@@ -498,16 +615,22 @@ function loadOmpSessions(repoRoot: string, notBefore = 0): SessionMeta[] {
     } catch {
       continue;
     }
-    if (stat.isSymbolicLink() || !stat.isDirectory() || stat.uid !== userInfo().uid) continue;
-    for (const entry of readdirSync(dir)) {
+    if (stat.isSymbolicLink() || !stat.isDirectory() || stat.uid !== uid) continue;
+    let entries: string[];
+    try {
+      entries = readdirSync(dir);
+    } catch {
+      continue;
+    }
+    for (const entry of entries) {
       const path = join(dir, entry);
-      if (entry.endsWith('.jsonl')) {
-        if (isOlderThan(path, notBefore)) continue;
-        const meta = inspectOmpSession(path, repoRoot);
-        if (meta && meta.promptCount > 0) out.push(meta);
-      } else {
+      if (!entry.endsWith('.jsonl')) {
         stack.push(path);
+        continue;
       }
+      if (skipUnread(path, window, matches)) continue;
+      const meta = inspect(path, roots);
+      if (meta && meta.promptCount > 0) out.push(meta);
     }
   }
   return out;
