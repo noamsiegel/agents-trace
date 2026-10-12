@@ -41,6 +41,7 @@ describe('Codex producer patch paths', () => {
     const before = '*** Begin Patch\n*** Add File: first.ts\n+';
     const after = '\n*** Update File: second.ts\n@@\n-old\n+new\n*** End Patch';
     expect(paths(exec(`tools.apply_patch(${JSON.stringify(before)} + JSON.stringify(config) + ${JSON.stringify(after)})`))).toEqual(['/repo/first.ts', '/repo/second.ts']);
+    expect(paths(exec('tools.apply_patch(`' + before + '${JSON.stringify(config)}' + after + '`)'))).toEqual(['/repo/first.ts', '/repo/second.ts']);
   });
 
   test('does not guess partially dynamic paths or identifier bindings', () => {

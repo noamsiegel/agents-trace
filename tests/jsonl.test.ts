@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, expect, test } from 'bun:test';
-import { appendFileSync, linkSync, mkdirSync, mkdtempSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
+import { appendFileSync, copyFileSync, linkSync, mkdirSync, mkdtempSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { spawnSync } from 'node:child_process';
@@ -35,7 +35,8 @@ test('large sessions retain the last prompt and file reference beyond 50,000 row
   // More than the former file-size and row-count limits, without buffering the fixture.
   for (let n = 0; n < 501; n++) appendFileSync(file, noise.repeat(100));
   appendFileSync(file, JSON.stringify({ type: 'event_msg', timestamp, payload: { type: 'user_message', message: 'last prompt survives' } }) + '\n');
-  appendFileSync(file, JSON.stringify({ type: 'response_item', timestamp, payload: { type: 'function_call', name: 'apply_patch', arguments: JSON.stringify({ file_path: join(repo, 'a.txt') }) } }));
+  const patch = '*** Begin Patch\n*** Update File: a.txt\n@@\n-before\n+after\n*** End Patch';
+  appendFileSync(file, JSON.stringify({ type: 'response_item', timestamp, payload: { type: 'custom_tool_call', name: 'exec', input: `text(await tools.apply_patch(${JSON.stringify(patch)}))` } }));
   expect(statSync(file).size).toBeGreaterThan(20 * 1024 * 1024);
   expect(readHeader(file).cwd).toBe(repo);
   const meta = inspectCodexSession(file, repo);
@@ -51,6 +52,13 @@ test('large sessions retain the last prompt and file reference beyond 50,000 row
   const handoff = spawnSync('bun', [cli, 'handoff', '--root', repo, '--source', 'codex'], { env, encoding: 'utf8' });
   expect(handoff.status).toBe(0);
   expect(handoff.stdout).toContain('last prompt survives');
+  const build = spawnSync('bun', ['run', 'build'], { cwd: new URL('../', import.meta.url).pathname, encoding: 'utf8' });
+  expect(build.status).toBe(0);
+  const standalone = join(dir, 'standalone.js');
+  copyFileSync(new URL('../dist/cli.js', import.meta.url), standalone);
+  const packaged = spawnSync('bun', ['--no-install', standalone, 'sessions-since', 'main', '--root', repo, '--source', 'codex', '--scope', 'file'], { cwd: dir, env, encoding: 'utf8' });
+  expect(packaged.status).toBe(0);
+  expect(packaged.stdout).toContain('large.jsonl  prompts=1');
 });
 
 test('chunk boundaries preserve UTF-8, CRLF, and an unterminated final row', () => {

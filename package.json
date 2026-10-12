@@ -3,6 +3,9 @@
   "version": "0.12.0",
   "private": true,
   "type": "module",
+  "scripts": {
+    "build": "bun build ./cli.ts --target=bun --outfile ./dist/cli.js"
+  },
   "bin": {
     "agents-trace": "./cli.ts"
   },

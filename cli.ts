@@ -119,7 +119,8 @@ function parseArgs(argv: string[]): Args {
         args.session = argv[++i];
         break;
       case '--last-prompts':
-        args.lastPrompts = Number.parseInt(argv[++i]!, 10);
+        args.lastPrompts = Number(argv[++i]);
+        if (!Number.isSafeInteger(args.lastPrompts) || args.lastPrompts < 1) die('--last-prompts must be a positive integer', 2);
         break;
       case '--help':
       case '-h':

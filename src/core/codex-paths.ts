@@ -55,7 +55,12 @@ function staticFragments(node: AnyNode): string {
   while (stack.length) {
     const part = stack.pop()!;
     if (part.type === 'Literal' && typeof part.value === 'string') parts.push(part.value);
-    else if (part.type === 'TemplateLiteral' && part.expressions.length === 0) parts.push(part.quasis[0]?.value.cooked ?? DYNAMIC);
+    else if (part.type === 'TemplateLiteral') {
+      for (let i = 0; i < part.quasis.length; i++) {
+        parts.push(part.quasis[i]!.value.cooked ?? DYNAMIC);
+        if (i < part.expressions.length) parts.push(DYNAMIC);
+      }
+    }
     else if (part.type === 'BinaryExpression' && part.operator === '+') stack.push(part.right, part.left);
     // shortcut: identifiers and computed expressions remain unknown; add lexical binding resolution if producer evidence needs it.
     else parts.push(DYNAMIC);

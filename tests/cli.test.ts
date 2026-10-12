@@ -53,6 +53,14 @@ describe('CLI basics', () => {
     expect(r.stdout).toContain('emails');
     expect(r.stdout).toContain('home-paths');
   });
+
+  test('handoff rejects invalid prompt limits before scanning sessions', () => {
+    for (const limit of ['0', '-1', 'NaN', '3junk']) {
+      const r = runCli('handoff', '--last-prompts', limit);
+      expect(r.status).toBe(2);
+      expect(r.stderr).toContain('--last-prompts must be a positive integer');
+    }
+  });
 });
 
 describe('collect end-to-end with synthetic session', () => {

@@ -23,9 +23,10 @@ These do not change without a major version bump.
    `neutralizeUntrustedText`, `escapeMarkdownFences`).
 4. **Local JSONL reads must stay safe**: session loading rejects symlinks,
    hardlinks, non-regular files, wrong-owner files, oversized files, and inode
-   swaps between `lstat` and `fstat`; row processing is capped. See
-   `src/core/session.ts` (`safeReadJsonl`, `MAX_JSONL_BYTES`,
-   `MAX_JSONL_ROWS`).
+   swaps between `lstat` and `fstat`. Reads stream a finite file snapshot with an
+   8 MiB per-record bound; oversize records fail explicitly. Total file size and
+   row count do not truncate a trace. See `src/core/session.ts`
+   (`safeReadJsonl`, `MAX_JSONL_RECORD_BYTES`).
 5. **Session selection must be scoped to the repo and PR**: Claude Code sessions
    are loaded from the cwd-encoded project directory; Codex sessions are kept
    only when recorded `cwd` is inside the repo or one of its worktrees. Default
@@ -51,6 +52,7 @@ cli.ts                         Bun executable, argument parsing, command wiring,
 src/core/session.ts            Claude/Codex session discovery, safe JSONL reads,
                                prompt extraction, time/file selection
 src/core/codex.ts              Codex session-tree walking helper
+src/core/codex-paths.ts        static parsing of recorded Codex patch-tool arguments
 src/core/scope.ts              repo-relative path normalization and file-scope
                                intersection
 src/core/sanitize.ts           audit/handoff sanitization and markdown rendering
@@ -63,6 +65,8 @@ src/adapters/gh-client.ts      GitHub CLI adapter: PR context/body, gist upsert,
 src/adapters/gitleaks.ts       gitleaks command adapter returning structured findings
 tests/cli.test.ts              CLI behavior, session loading, source selection,
                                safe reads
+tests/jsonl.test.ts            streamed large-session CLI and reader safety regressions
+tests/codex-paths.test.ts       patch syntax, turn cwd, and misleading-input exclusions
 tests/sanitize.test.ts         scrubber and markdown-neutralization behavior
 tests/posting-plan.test.ts     posting-policy matrix
 tests/gh-client.test.ts        fake-runner GitHub adapter tests
