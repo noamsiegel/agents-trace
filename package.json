@@ -3,10 +3,16 @@
   "version": "0.12.0",
   "private": true,
   "type": "module",
+  "scripts": {
+    "build": "bun build ./cli.ts --target=bun --outfile ./dist/cli.js"
+  },
   "bin": {
     "agents-trace": "./cli.ts"
   },
   "devDependencies": {
     "bun-types": "^1.0.0"
+  },
+  "dependencies": {
+    "acorn": "8.19.0"
   }
 }

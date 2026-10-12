@@ -61,17 +61,9 @@ export function collectMarkdown(repoRoot: string, prNum: number, baseRef: string
     const prompts: { ts: string; text: string }[] = [];
     const plans: Plan[] = [];
     let planCollect: { ts: string; chunks: string[] } | null = null;
-    let rowCount = 0;
-    for (const line of sessionContent.split('\n')) {
-      if (++rowCount > 50000) break;
-      if (!line.trim()) continue;
-      let row: { type?: string; timestamp?: string; message?: { content?: unknown }; payload?: unknown };
-      try {
-        row = JSON.parse(line);
-      } catch {
-        continue;
-      }
-      const ts = row.timestamp ? new Date(row.timestamp).toISOString().slice(11, 19) : '';
+    for (const row of sessionContent) {
+      const time = typeof row.timestamp === 'string' ? Date.parse(row.timestamp) : NaN;
+      const ts = Number.isNaN(time) ? '' : new Date(time).toISOString().slice(11, 19);
 
       // Plan-mode termination: any user row (filtered or raw) ends the plan capture.
       if (planCollect !== null && isAnyUserRow(row)) {

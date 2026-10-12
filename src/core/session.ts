@@ -1,10 +1,10 @@
-import { closeSync, existsSync, fstatSync, lstatSync, openSync, readSync, readdirSync, realpathSync } from 'node:fs';
-import { dirname, join, resolve } from 'node:path';
+import { closeSync, constants, existsSync, fstatSync, lstatSync, openSync, readSync, readdirSync, realpathSync } from 'node:fs';
+import { dirname, isAbsolute, join, resolve } from 'node:path';
 import { homedir, userInfo } from 'node:os';
 import { normalizeToRepoRelative, intersectsScope, touchesScopeBySuffix } from './scope.ts';
+import { addCodexToolPaths } from './codex-paths.ts';
 
-const MAX_JSONL_BYTES = 20 * 1024 * 1024;
-const MAX_JSONL_ROWS = 50000;
+const MAX_JSONL_RECORD_BYTES = 8 * 1024 * 1024;
 
 export interface SessionMeta {
   path: string;
@@ -197,28 +197,12 @@ export function inspectSession(path: string): SessionMeta | null {
   let firstTs = Number.POSITIVE_INFINITY;
   let lastTs = 0;
   let promptCount = 0;
-  let rowCount = 0;
   const filesTouched = new Set<string>();
-  for (const line of content.split('\n')) {
-    if (++rowCount > MAX_JSONL_ROWS) break;
-    if (!line.trim()) continue;
-    let row: {
-      type?: string;
-      timestamp?: string;
-      message?: { content?: unknown };
-      toolUseResult?: unknown;
-    };
-    try {
-      row = JSON.parse(line);
-    } catch {
-      continue;
-    }
-    if (row.timestamp) {
-      const t = Date.parse(row.timestamp);
-      if (!Number.isNaN(t)) {
-        if (t < firstTs) firstTs = t;
-        if (t > lastTs) lastTs = t;
-      }
+  for (const row of content) {
+    const t = timestampOf(row);
+    if (t !== 0) {
+      if (t < firstTs) firstTs = t;
+      if (t > lastTs) lastTs = t;
     }
     if (isPromptRow(row)) promptCount++;
     extractFilePaths(row, filesTouched);
@@ -230,22 +214,14 @@ export function inspectCodexSession(path: string, repoRoot: string | readonly st
   const content = safeReadJsonl(path);
   if (content === null) return null;
   let cwd: string | null = null;
+  let toolCwd: string | null = null;
   let firstTs = Number.POSITIVE_INFINITY;
   let lastTs = 0;
   let promptCount = 0;
-  let rowCount = 0;
   const filesTouched = new Set<string>();
+  const recordedPaths = new Set<string>();
 
-  for (const line of content.split('\n')) {
-    if (++rowCount > MAX_JSONL_ROWS) break;
-    if (!line.trim()) continue;
-    let row: { type?: string; timestamp?: string; payload?: unknown };
-    try {
-      row = JSON.parse(line);
-    } catch {
-      continue;
-    }
-
+  for (const row of content) {
     const t = timestampOf(row);
     if (t !== 0) {
       if (t < firstTs) firstTs = t;
@@ -254,14 +230,22 @@ export function inspectCodexSession(path: string, repoRoot: string | readonly st
 
     const payload = row.payload && typeof row.payload === 'object' ? row.payload as Record<string, unknown> : null;
     if (row.type === 'session_meta' && typeof payload?.cwd === 'string') {
-      cwd = resolve(payload.cwd);
+      cwd = isAbsolute(payload.cwd) ? resolve(payload.cwd) : null;
+      toolCwd = cwd;
     }
     if (row.type === 'turn_context' && typeof payload?.cwd === 'string') {
-      cwd ??= resolve(payload.cwd);
+      toolCwd = isAbsolute(payload.cwd) ? resolve(payload.cwd) : null;
+      cwd ??= toolCwd;
     }
 
     if (isPromptRow(row)) promptCount++;
-    extractFilePaths(row, filesTouched);
+    recordedPaths.clear();
+    extractFilePaths(row, recordedPaths);
+    for (const file of recordedPaths) {
+      if (file.startsWith('/')) filesTouched.add(resolve(file));
+      else if (toolCwd !== null) filesTouched.add(resolve(toolCwd, file));
+    }
+    addCodexToolPaths(row, filesTouched, toolCwd);
   }
 
   // Codex stores sessions in a global tree rather than a cwd-encoded directory.
@@ -286,19 +270,9 @@ export function inspectOmpSession(path: string, repoRoot: string | readonly stri
   let firstTs = Number.POSITIVE_INFINITY;
   let lastTs = 0;
   let promptCount = 0;
-  let rowCount = 0;
   const filesTouched = new Set<string>();
 
-  for (const line of content.split('\n')) {
-    if (++rowCount > MAX_JSONL_ROWS) break;
-    if (!line.trim()) continue;
-    let row: { type?: string; timestamp?: string; cwd?: string; message?: unknown };
-    try {
-      row = JSON.parse(line);
-    } catch {
-      continue;
-    }
-
+  for (const row of content) {
     const t = timestampOf(row);
     if (t !== 0) {
       if (t < firstTs) firstTs = t;
@@ -396,7 +370,8 @@ export function selectHandoffSession(sessions: SessionMeta[], name?: string): Se
   return [...sessions].sort((a, b) => b.lastTs - a.lastTs)[0];
 }
 
-export function safeReadJsonl(path: string, maxBytes = Number.POSITIVE_INFINITY): string | null {
+/** A finite file snapshot, streamed with bounded records; unsafe files are never opened for parsing. */
+export function safeReadJsonl(path: string, maxBytes = Number.POSITIVE_INFINITY): Generator<Record<string, unknown>> | null {
   let stat;
   try {
     stat = lstatSync(path);
@@ -407,29 +382,62 @@ export function safeReadJsonl(path: string, maxBytes = Number.POSITIVE_INFINITY)
   if (stat.isSymbolicLink()) return null;
   if (stat.nlink > 1) return null;
   if (stat.uid !== userInfo().uid) return null;
-  if (stat.size > MAX_JSONL_BYTES) return null;
 
   let fd: number;
   try {
-    fd = openSync(path, 'r');
+    fd = openSync(path, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
   } catch {
     return null;
   }
-  try {
-    const fstat = fstatSync(fd);
-    if (fstat.ino !== stat.ino || fstat.dev !== stat.dev) return null;
-    const size = Math.min(fstat.size, maxBytes);
-    const buf = Buffer.alloc(size);
-    let offset = 0;
-    while (offset < size) {
-      const n = readSync(fd, buf, offset, size - offset, offset);
-      if (n <= 0) break;
-      offset += n;
-    }
-    return buf.toString('utf8', 0, offset);
-  } finally {
+  let snapshot;
+  try { snapshot = fstatSync(fd); } catch (err) {
     closeSync(fd);
+    throw err;
   }
+  if (!snapshot.isFile() || snapshot.uid !== stat.uid || snapshot.nlink > 1 || snapshot.ino !== stat.ino || snapshot.dev !== stat.dev) {
+    closeSync(fd);
+    return null;
+  }
+  const size = Math.min(snapshot.size, maxBytes);
+  return (function* () {
+    const buf = Buffer.alloc(64 * 1024);
+    let parts: Buffer[] = [];
+    let recordBytes = 0;
+    const parseRow = () => {
+      const line = Buffer.concat(parts, recordBytes).toString('utf8');
+      parts = [];
+      recordBytes = 0;
+      let row: unknown;
+      try { row = JSON.parse(line); } catch { return null; }
+      return row !== null && typeof row === 'object' && !Array.isArray(row) ? row as Record<string, unknown> : null;
+    };
+    try {
+      let offset = 0;
+      while (offset < size) {
+        const n = readSync(fd, buf, 0, Math.min(buf.length, size - offset), offset);
+        if (n === 0) throw new Error(`session file truncated while reading: ${path}`);
+        offset += n;
+        for (let start = 0; start < n;) {
+          const newline = buf.indexOf(10, start);
+          const end = newline < 0 || newline >= n ? n : newline;
+          recordBytes += end - start;
+          if (recordBytes > MAX_JSONL_RECORD_BYTES) throw new Error(`JSONL record exceeds 8 MiB: ${path}`);
+          parts.push(Buffer.from(buf.subarray(start, end)));
+          start = end + 1;
+          if (end === n) break;
+          const row = parseRow();
+          if (row !== null) yield row;
+        }
+      }
+      // A header byte cap may end inside a row; only the full file's final row is parseable.
+      if (size === snapshot.size && recordBytes > 0) {
+        const row = parseRow();
+        if (row !== null) yield row;
+      }
+    } finally {
+      closeSync(fd);
+    }
+  })();
 }
 
 export function isPromptRow(row: unknown): boolean {
@@ -546,8 +554,8 @@ function finiteSession(path: string, firstTs: number, lastTs: number, promptCoun
   return { path, firstTs, lastTs, promptCount, filesTouched };
 }
 
-function timestampOf(row: { timestamp?: string }): number {
-  if (!row.timestamp) return 0;
+function timestampOf(row: { timestamp?: unknown }): number {
+  if (typeof row.timestamp !== 'string') return 0;
   const t = Date.parse(row.timestamp);
   return Number.isNaN(t) ? 0 : t;
 }
@@ -570,23 +578,16 @@ export function readHeader(path: string): { cwd: string | null; startTs: number 
   const unknown = { cwd: null, startTs: Number.POSITIVE_INFINITY };
   const head = safeReadJsonl(path, HEADER_BYTES);
   if (head === null) return unknown;
-  const lines = head.split('\n');
-  // The last piece is partial when the read stopped at the byte cap.
-  if (head.length >= HEADER_BYTES) lines.pop();
   let cwd: string | null = null;
   let startTs = Number.POSITIVE_INFINITY;
-  for (const line of lines.slice(0, HEADER_ROWS)) {
-    if (!line.trim()) continue;
-    let row: { type?: string; timestamp?: string; cwd?: unknown; payload?: { cwd?: unknown } };
-    try {
-      row = JSON.parse(line);
-    } catch {
-      continue;
-    }
+  let rowCount = 0;
+  for (const row of head) {
     const t = timestampOf(row);
     if (t !== 0 && t < startTs) startTs = t;
-    if (cwd === null && typeof row.cwd === 'string') cwd = row.cwd;
-    if (cwd === null && row.type === 'session_meta' && typeof row.payload?.cwd === 'string') cwd = row.payload.cwd;
+    if (cwd === null && typeof row.cwd === 'string' && isAbsolute(row.cwd)) cwd = row.cwd;
+    const payload = row.payload !== null && typeof row.payload === 'object' ? row.payload as { cwd?: unknown } : null;
+    if (cwd === null && row.type === 'session_meta' && typeof payload?.cwd === 'string' && isAbsolute(payload.cwd)) cwd = payload.cwd;
+    if (++rowCount >= HEADER_ROWS) break;
   }
   return { cwd, startTs };
 }
@@ -608,7 +609,7 @@ export function readHeader(path: string): { cwd: string | null; startTs: number 
 function skipUnread(path: string, window: SessionWindow, matches: ((cwd: string) => boolean) | null): boolean {
   if (isOlderThan(path, window.notBefore)) return true;
   const header = readHeader(path);
-  if (header.startTs > window.notAfter) return true;
+  if (Number.isFinite(header.startTs) && header.startTs > window.notAfter) return true;
   return matches !== null && header.cwd !== null && !matches(header.cwd);
 }
 

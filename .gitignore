@@ -11,6 +11,7 @@
 
 # Node
 node_modules/
+dist/
 
 # Local scrubber config (user-private)
 config.yaml

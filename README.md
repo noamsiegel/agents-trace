@@ -89,7 +89,8 @@ Requires [`bun`](https://bun.sh), [`gh`](https://cli.github.com), and
 
 ```bash
 git clone https://github.com/noamsiegel/agents-trace.git ~/.local/share/agents-trace
-ln -s ~/.local/share/agents-trace/bin/agents-trace ~/.local/bin/agents-trace
+bun install --cwd ~/.local/share/agents-trace --production --frozen-lockfile
+ln -s ~/.local/share/agents-trace/cli.ts ~/.local/bin/agents-trace
 ```
 
 Authenticate `gh`:
@@ -120,6 +121,22 @@ Transcript age, start time, and cwd are checked before reading whole files.
 PR commands use the PR's base and head commits, independently of the checkout's
 current branch. `--scope file` requires file overlap without falling back to time
 overlap, which is appropriate for unattended attachment.
+
+Sessions are read row by row, without a total file-size or row-count cutoff.
+Input buffering is bounded to one 8 MiB JSONL record. A larger individual record
+fails explicitly instead of producing an incomplete trace. Symlinks, hardlinks,
+wrong-owner files, and inode swaps remain rejected. Each read stops at its opening
+size; concurrently appended rows wait for a later read. Audit output still
+occupies memory proportional to the selected text.
+
+Codex path selection reads recorded `apply_patch` arguments, including patch calls
+inside `exec` JavaScript. Acorn parses this syntax without executing transcript
+code. Add, update, delete, and move paths are resolved against each turn's cwd.
+These are attempted file references, not proof of successful edits. Dynamic paths
+and identifier-bound patch arguments are not guessed.
+
+For packaging, `bun run build` produces `dist/cli.js` with Acorn included. The
+bundle runs under Bun without a source tree or runtime `node_modules` directory.
 
 ## Configuration
 
