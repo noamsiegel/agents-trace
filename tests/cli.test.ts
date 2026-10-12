@@ -12,7 +12,7 @@ import { spawnSync } from 'node:child_process';
 import { mkdirSync, mkdtempSync, rmSync, utimesSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { encodeCwd, readHeader, loadRepoSessions, loadSessionsForRoots, selectSessionsForRange, type SessionMeta } from '../src/core/session.ts';
+import { encodeCwd, extractFilePaths, readHeader, loadRepoSessions, loadSessionsForRoots, selectSessionsForRange, type SessionMeta } from '../src/core/session.ts';
 import { loadCodexSessions } from '../src/core/codex.ts';
 import { loadOmpSessions } from '../src/core/omp.ts';
 import { normalizeToRepoRelative, intersectsScope } from '../src/core/scope.ts';
@@ -404,6 +404,19 @@ describe('OMP session adapter', () => {
     expect(names).toContain('inside.jsonl');
     expect(names).not.toContain('sibling.jsonl');
     expect(names).not.toContain('unverified.jsonl');
+  });
+
+  test('OMP read/write paths and edit patch headers count as touched files', () => {
+    // OMP never writes `file_path`. Before this, every OMP session had zero touched files and
+    // could not match a PR by file overlap.
+    const out = new Set<string>();
+    extractFilePaths({ type: 'message', message: { role: 'assistant', content: [
+      { type: 'toolCall', name: 'write', arguments: { path: '/w/apps/a.py', content: 'x' } },
+      { type: 'toolCall', name: 'read', arguments: { path: '/w/apps/b.py' } },
+      { type: 'toolCall', name: 'edit', arguments: { input: '[/w/apps/c.py#D5C0]\nPUT >4:\n+x\n[/w/apps/d.py#AB12]\nDEL 3' } },
+      { type: 'toolCall', name: 'bash', arguments: { command: 'cat /w/apps/e.py', path: '/w/apps/e.py' } },
+    ] } }, out);
+    expect([...out].sort()).toEqual(['/w/apps/a.py', '/w/apps/b.py', '/w/apps/c.py', '/w/apps/d.py']);
   });
 
   test('auto does not let a Claude transcript hide OMP sessions', () => {

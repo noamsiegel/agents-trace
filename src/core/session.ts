@@ -327,6 +327,7 @@ export function extractFilePaths(row: unknown, out: Set<string>): void {
       for (const item of v) stack.push(item);
       continue;
     }
+    addOmpToolPaths(v as Record<string, unknown>, out);
     for (const [k, val] of Object.entries(v as Record<string, unknown>)) {
       if (k === 'file_path' && typeof val === 'string' && val.length > 0) {
         out.add(val);
@@ -340,6 +341,26 @@ export function extractFilePaths(row: unknown, out: Set<string>): void {
         stack.push(val);
       }
     }
+  }
+}
+
+/** OMP's edit patch names each file on a header line: `[/abs/path/file.py#D5C0]`. */
+const OMP_EDIT_HEADER = /^\[([^\]\n#]+)#[0-9A-Za-z]+\]$/gm;
+
+/**
+ * OMP tool calls (`{type:"toolCall", name, arguments}`) do not use `file_path`: `read` and
+ * `write` take `arguments.path`, and `edit` takes a patch in `arguments.input` whose header
+ * lines name the files. Without this, an OMP session recorded no touched files at all, so it
+ * could never match a PR by file overlap, and selection fell back to time alone.
+ */
+function addOmpToolPaths(v: Record<string, unknown>, out: Set<string>): void {
+  if (v.type !== 'toolCall' || !v.arguments || typeof v.arguments !== 'object') return;
+  const args = v.arguments as { path?: unknown; input?: unknown };
+  if ((v.name === 'read' || v.name === 'write') && typeof args.path === 'string' && args.path.length > 0) {
+    out.add(args.path);
+  }
+  if (v.name === 'edit' && typeof args.input === 'string') {
+    for (const m of args.input.matchAll(OMP_EDIT_HEADER)) out.add(m[1]!);
   }
 }
 
