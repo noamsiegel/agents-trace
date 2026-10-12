@@ -1,5 +1,5 @@
 import { closeSync, constants, existsSync, fstatSync, lstatSync, openSync, readSync, readdirSync, realpathSync } from 'node:fs';
-import { dirname, join, resolve } from 'node:path';
+import { dirname, isAbsolute, join, resolve } from 'node:path';
 import { homedir, userInfo } from 'node:os';
 import { normalizeToRepoRelative, intersectsScope, touchesScopeBySuffix } from './scope.ts';
 import { addCodexToolPaths } from './codex-paths.ts';
@@ -230,12 +230,12 @@ export function inspectCodexSession(path: string, repoRoot: string | readonly st
 
     const payload = row.payload && typeof row.payload === 'object' ? row.payload as Record<string, unknown> : null;
     if (row.type === 'session_meta' && typeof payload?.cwd === 'string') {
-      cwd = resolve(payload.cwd);
+      cwd = isAbsolute(payload.cwd) ? resolve(payload.cwd) : null;
       toolCwd = cwd;
     }
     if (row.type === 'turn_context' && typeof payload?.cwd === 'string') {
-      cwd ??= resolve(payload.cwd);
-      toolCwd = resolve(payload.cwd);
+      toolCwd = isAbsolute(payload.cwd) ? resolve(payload.cwd) : null;
+      cwd ??= toolCwd;
     }
 
     if (isPromptRow(row)) promptCount++;
@@ -584,9 +584,9 @@ export function readHeader(path: string): { cwd: string | null; startTs: number 
   for (const row of head) {
     const t = timestampOf(row);
     if (t !== 0 && t < startTs) startTs = t;
-    if (cwd === null && typeof row.cwd === 'string') cwd = row.cwd;
+    if (cwd === null && typeof row.cwd === 'string' && isAbsolute(row.cwd)) cwd = row.cwd;
     const payload = row.payload !== null && typeof row.payload === 'object' ? row.payload as { cwd?: unknown } : null;
-    if (cwd === null && row.type === 'session_meta' && typeof payload?.cwd === 'string') cwd = payload.cwd;
+    if (cwd === null && row.type === 'session_meta' && typeof payload?.cwd === 'string' && isAbsolute(payload.cwd)) cwd = payload.cwd;
     if (++rowCount >= HEADER_ROWS) break;
   }
   return { cwd, startTs };

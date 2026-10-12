@@ -117,6 +117,8 @@ test('unknown headers survive the time prefilter and resolve relative patches ag
     call,
     { type: 'turn_context', timestamp, payload: { cwd: join(repo, 'apps/web') } },
     call,
+    { type: 'turn_context', timestamp, payload: { cwd: 'relative' } },
+    call,
   ].map(row => JSON.stringify(row)).join('\n'));
   const original = process.env.HOME;
   try {
@@ -125,4 +127,15 @@ test('unknown headers survive the time prefilter and resolve relative patches ag
     expect(result).toHaveLength(1);
     expect(result[0]!.filesTouched).toEqual(new Set([join(repo, 'src/a.ts'), join(repo, 'apps/web/src/a.ts')]));
   } finally { process.env.HOME = original; }
+});
+
+test('relative producer cwd is unknown, rather than resolved against the tool checkout', () => {
+  const file = join(dir, 'relative.jsonl');
+  const timestamp = new Date().toISOString();
+  writeFileSync(file, [
+    { type: 'session_meta', timestamp, payload: { cwd: '.' } },
+    { type: 'event_msg', timestamp, payload: { type: 'user_message', message: 'unknown provenance' } },
+  ].map(row => JSON.stringify(row)).join('\n'));
+  expect(readHeader(file).cwd).toBeNull();
+  expect(inspectCodexSession(file, process.cwd())).toBeNull();
 });
